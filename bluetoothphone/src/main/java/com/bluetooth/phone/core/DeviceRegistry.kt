@@ -53,17 +53,14 @@ internal class DeviceRegistry {
         publish()
     }
 
-    /** 更新 HFP 连接状态；连接成功时自动设为当前设备。 */
+    /** 更新 HFP 连接状态；没有可用当前设备时才接管焦点。 */
     fun updateConnection(address: String, state: ProfileState) {
         val current = map[address] ?: return
         map[address] = current.copy(hfpState = state)
         // 已有可用当前设备时不抢焦点，避免第二台手机连接打断正在进行的通话。
         if (state == ProfileState.CONNECTED) {
             val active = map[_activeAddress.value]
-            if (active == null || !active.isConnected) select(address)
-        }
-        if (state == ProfileState.DISCONNECTED && _activeAddress.value == address) {
-            _activeAddress.value = map.values.firstOrNull { it.isConnected }?.address
+            if (active == null || !active.isConnected) _activeAddress.value = address
         }
         ensureActive()
         publish()
@@ -99,20 +96,13 @@ internal class DeviceRegistry {
     fun select(address: String) {
         if (map[address] == null) return
         _activeAddress.value = address
-        map.keys.forEach { key ->
-            map[key] = map.getValue(key).copy(isActive = key == address)
-        }
+        syncActiveFlags()
         publish()
     }
 
     /** 当前设备不可用时，自动选第一台已连接设备。 */
     fun selectConnectedIfNeeded() {
-        if (map[_activeAddress.value]?.isConnected == true) return
-        _activeAddress.value = map.values.firstOrNull { it.isConnected }?.address
-        val active = _activeAddress.value
-        map.keys.forEach { key ->
-            map[key] = map.getValue(key).copy(isActive = key == active)
-        }
+        ensureActive()
         publish()
     }
 
@@ -138,12 +128,19 @@ internal class DeviceRegistry {
     /** 当前设备不可用时重新选择，并同步 isActive。 */
     private fun ensureActive() {
         val current = map[_activeAddress.value]
-        if (current != null && current.isConnected) return
+        if (current == null || !current.isConnected) {
+            _activeAddress.value = map.values.firstOrNull { it.isConnected }?.address
+        }
+        syncActiveFlags()
+    }
 
-        _activeAddress.value = map.values.firstOrNull { it.isConnected }?.address
+    /** 只把 isActive 标记同步到当前设备，避免整表无意义重建。 */
+    private fun syncActiveFlags() {
         val active = _activeAddress.value
         map.keys.forEach { key ->
-            map[key] = map.getValue(key).copy(isActive = key == active)
+            val device = map.getValue(key)
+            val flag = key == active
+            if (device.isActive != flag) map[key] = device.copy(isActive = flag)
         }
     }
 

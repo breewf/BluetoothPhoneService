@@ -92,13 +92,11 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 权限结果：授予后补启动一次，确保 HFP 代理立即建立。 */
+    /** 权限结果：无论是否全部授予都补启动一次，中间件会按实际权限降级。 */
     fun onPermissionResult(granted: Boolean) {
-        if (!granted) {
-            setStatus("部分权限未授予，通讯录/通话记录可能不可用")
-            return
-        }
-        setStatus("权限已授予")
+        setStatus(
+            if (granted) "权限已授予" else "部分权限未授予，通讯录/通话记录可能不可用"
+        )
         phone.start()
         phone.refresh()
     }
@@ -147,12 +145,13 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
 
             state.call.waiting != null -> setStatus("有等待来电，请先接听或拒接")
             state.call.outgoing != null -> setStatus("已有去电中的通话，请等待接通")
+            state.call.isConference -> setStatus("会议通话中不支持加拨")
             state.call.hasCall -> setStatus("当前已有两路通话，请先处理一路")
             else -> runAction("正在拨号") { phone.dial(state.number) }
         }
     }
 
-    /** 接听来电。 */
+    /** 接听响铃中的一路：普通来电优先，其次是没有活动通话时的等待来电。 */
     fun answer() = runAction("已接听") { phone.answer() }
 
     /** 拒接来电或第二路等待。 */

@@ -1,6 +1,7 @@
 package com.example.bluetoothphoneservice.ui
 
 import com.bluetooth.phone.api.AudioState
+import com.bluetooth.phone.api.CallDirection
 import com.bluetooth.phone.api.CallKind
 import com.bluetooth.phone.api.CallState
 import com.bluetooth.phone.api.CallUiState
@@ -35,6 +36,13 @@ fun CallState.label(): String = when (this) {
     CallState.HELD -> "保持中"
     CallState.HELD_BY_RESPONSE -> "响应保持"
     CallState.TERMINATED -> "已结束"
+}
+
+/** 通话方向文案。 */
+fun CallDirection.label(): String = when (this) {
+    CallDirection.INCOMING -> "来电"
+    CallDirection.OUTGOING -> "去电"
+    CallDirection.UNKNOWN -> "未知方向"
 }
 
 /** 通话界面阶段文案。 */

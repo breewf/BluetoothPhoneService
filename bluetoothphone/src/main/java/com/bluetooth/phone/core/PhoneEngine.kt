@@ -2,6 +2,7 @@ package com.bluetooth.phone.core
 
 import android.content.Context
 import android.media.AudioManager
+import android.os.SystemClock
 import com.bluetooth.phone.BluetoothPhoneConfig
 import com.bluetooth.phone.api.AudioRoute
 import com.bluetooth.phone.api.AudioState
@@ -38,12 +39,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -91,7 +92,12 @@ internal class PhoneEngine(
         extraBufferCapacity = 16
     )
 
+    /** 是否已启动；[shutdown] 可能来自主线程，需要保证可见性。 */
+    @Volatile
     private var started = false
+
+    /** 蓝牙开关快照，用于推导整体连接状态。 */
+    @Volatile
     private var adapterEnabled = false
 
     /** 每台设备的自动重连次数。 */
@@ -106,6 +112,9 @@ internal class PhoneEngine(
 
     /** 避免并发重复加载联系人。 */
     private var contactsLoading = false
+
+    /** 上一次加载联系人的时刻，避免启动阶段重复全量读取。 */
+    private var lastContactLoadElapsed = 0L
 
     /** 上一次对外发布的通话快照，用于生成来电/结束/阶段变化事件。 */
     private var lastPublishedState: PhoneCallState = PhoneCallState()
@@ -169,6 +178,8 @@ internal class PhoneEngine(
             pbap.stop()
             ringtone.stop()
             serviceRestartJob?.cancel()
+            reconnectJobs.values.forEach { it.cancel() }
+            reconnectJobs.clear()
             registry.clearConnections()
             changeMicMute(false)
             emitAllCallsEnded()
@@ -177,16 +188,24 @@ internal class PhoneEngine(
         }
     }
 
-    /** 彻底释放：取消协程并关闭线程，实例不可再用。 */
+    /**
+     * 彻底释放：取消协程并关闭线程，实例不可再用。
+     * 先停网关和线程，再清理共享状态，避免与引擎线程中正在进行的归并竞争。
+     */
     fun shutdown() {
         started = false
-        emitAllCallsEnded()
-        changeMicMute(false)
-        ringtone.stop()
         runCatching { gateway.stop() }
         runCatching { pbap.stop() }
+        ringtone.stop()
+        serviceRestartJob?.cancel()
+        reconnectJobs.values.forEach { it.cancel() }
+        reconnectJobs.clear()
         scope.cancel()
         executor.shutdown()
+        // 引擎线程通常已空闲，这里只做有界等待。
+        runCatching { executor.awaitTermination(500, TimeUnit.MILLISECONDS) }
+        emitAllCallsEnded()
+        changeMicMute(false)
     }
 
     /** 重新拉取设备/通话/信号，并刷新当前设备。 */
@@ -254,6 +273,8 @@ internal class PhoneEngine(
             pbap.disconnect(address)
             if (callStore.state.value.deviceId == address) emitAllCallsEnded()
             callStore.clearDevice(address)
+            // 解绑可能发生在响铃过程中，按最新状态停掉铃声。
+            ringtone.update(callStore.state.value)
             success()
         } else {
             failure(PhoneError.NOT_READY, "解除配对失败")
@@ -305,11 +326,14 @@ internal class PhoneEngine(
         else failure(PhoneError.NOT_READY, "加拨失败")
     }
 
-    /** 接听普通来电。 */
+    /** 接听响铃中的一路：普通来电优先，其次是没有活动通话时的等待来电。 */
     suspend fun answer(): PhoneResult<Unit> = withContext(dispatcher) {
-        val incoming = callStore.state.value.incoming
+        val state = callStore.state.value
+        // 少数 AG 会把第二路直接上报为 WAITING 且当前没有活动通话，这里一并接听。
+        val ringing = state.incoming
+            ?: state.waiting?.takeIf { state.active == null }
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有来电")
-        if (gateway.acceptCall(incoming.deviceId, AnswerPolicy.NORMAL)) success()
+        if (gateway.acceptCall(ringing.deviceId, AnswerPolicy.NORMAL)) success()
         else failure(PhoneError.NOT_READY, "接听失败")
     }
 
@@ -658,10 +682,19 @@ internal class PhoneEngine(
     /** 把联系人姓名回填到已有通话；失败不影响主流程。 */
     private fun loadContactNames() {
         if (!contacts.canReadContacts() || contactsLoading) return
+        // 启动、蓝牙开启、设备连接会连续触发，短时间内只读一次，避免重复全表查询。
+        // 0 表示尚未加载过，避免开机不足一个间隔时被误判为“刚读过”。
+        val now = SystemClock.elapsedRealtime()
+        if (lastContactLoadElapsed != 0L &&
+            now - lastContactLoadElapsed < CONTACT_RELOAD_INTERVAL_MS
+        ) {
+            return
+        }
+        lastContactLoadElapsed = now
         contactsLoading = true
         scope.launch {
             try {
-                val matches = contacts.contacts(2_000)
+                val matches = contacts.contacts(CONTACT_LOOKUP_LIMIT)
                     .mapNotNull { contact ->
                         val name = contact.name?.takeIf { it.isNotBlank() }
                         val photoUri = contact.photoUri?.takeIf { it.isNotBlank() }
@@ -687,7 +720,8 @@ internal class PhoneEngine(
         registry.selectConnectedIfNeeded()
         // 优先跟随仍有通话的设备，其次才是任意已连接设备。
         val callDeviceId = callStore.state.value.deviceId
-        val target = callDeviceId?.let { registry.device(it) } ?: registry.activeDevice()
+        val target = callDeviceId?.let { registry.device(it) }?.takeIf { it.isConnected }
+            ?: registry.activeDevice()
         target?.let {
             if (callDeviceId != null) registry.select(it.address)
             callStore.selectDevice(it.address, it.displayName)
@@ -695,15 +729,15 @@ internal class PhoneEngine(
         scheduleReconnect(address)
     }
 
-    /** 自动重连：递增退避，最多 3 次；主动断开不重连。 */
+    /** 自动重连：递增退避，最多 [MAX_RECONNECT_ATTEMPTS] 次；主动断开不重连。 */
     private fun scheduleReconnect(address: String) {
         if (!config.autoReconnect || address in manualDisconnects) return
         val attempt = reconnectAttempts.getOrDefault(address, 0)
-        if (attempt >= 3) return
+        if (attempt >= MAX_RECONNECT_ATTEMPTS) return
         reconnectAttempts[address] = attempt + 1
         reconnectJobs.remove(address)?.cancel()
         reconnectJobs[address] = scope.launch {
-            delay(config.reconnectDelayMs * (attempt + 1))
+            delay((config.reconnectDelayMs * (attempt + 1)).milliseconds)
             if (!started || !gateway.isBluetoothEnabled()) return@launch
             if (registry.device(address)?.isConnected == true) return@launch
             gateway.connect(address)
@@ -716,7 +750,7 @@ internal class PhoneEngine(
         _events.tryEmit(PhoneEvent.Info("蓝牙电话服务断开，正在重连"))
         serviceRestartJob?.cancel()
         serviceRestartJob = scope.launch {
-            delay(500)
+            delay(GATEWAY_RESTART_DELAY_MS.milliseconds)
             if (!started || !gateway.isBluetoothEnabled()) return@launch
             gateway.stop()
             gateway.start()
@@ -744,7 +778,7 @@ internal class PhoneEngine(
         val device = registry.device(address) ?: return
         if (device.isConnected || device.hfpState == ProfileState.CONNECTING) return
         scope.launch {
-            delay(config.reconnectDelayMs)
+            delay(config.reconnectDelayMs.milliseconds)
             if (!started || !gateway.isBluetoothEnabled()) return@launch
             if (registry.device(address)?.isConnected == true) return@launch
             gateway.connect(address)
@@ -812,4 +846,18 @@ internal class PhoneEngine(
     /** 构造失败结果，message 可直接展示。 */
     private fun failure(error: PhoneError, message: String? = null): PhoneResult<Unit> =
         PhoneResult.Failure(error, message)
+
+    private companion object {
+        /** 自动重连的最大尝试次数。 */
+        const val MAX_RECONNECT_ATTEMPTS = 3
+
+        /** 蓝牙服务重启后，重建代理前的等待时间。 */
+        const val GATEWAY_RESTART_DELAY_MS = 500L
+
+        /** 联系人回填的重新读取间隔。 */
+        const val CONTACT_RELOAD_INTERVAL_MS = 30_000L
+
+        /** 联系人回填单次读取上限。 */
+        const val CONTACT_LOOKUP_LIMIT = 2_000
+    }
 }

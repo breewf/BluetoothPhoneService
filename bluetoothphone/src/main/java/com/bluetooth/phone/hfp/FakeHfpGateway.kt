@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * 无真机时使用的 HFP 模拟器。
@@ -150,7 +151,7 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
             _events.tryEmit(HfpEvent.ConnectionChanged(address, ProfileState.CONNECTING))
         }
         scope.launch {
-            delay(350)
+            delay(350.milliseconds)
             synchronized(lock) {
                 if (!started) return@synchronized
                 val device = devices[address] ?: return@synchronized
@@ -210,16 +211,16 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
             emitCalls(address)
 
             scope.launch {
-                delay(500)
+                delay(500.milliseconds)
                 updateCall(address, call.id) { it.state = CallState.ALERTING }
-                delay(700)
+                delay(700.milliseconds)
                 updateCall(address, call.id) { it.state = CallState.ACTIVE }
             }
             return true
         }
     }
 
-    /** 模拟接听：按策略保持或挂断当前通话。 */
+    /** 模拟接听：按策略保持或挂断当前通话；NORMAL 只在没有活动通话时使用。 */
     override fun acceptCall(address: String, policy: AnswerPolicy): Boolean {
         synchronized(lock) {
             val list = calls[address] ?: return false
@@ -300,7 +301,7 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
             _events.tryEmit(HfpEvent.AudioChanged(address, AudioState.CONNECTING, false))
         }
         scope.launch {
-            delay(200)
+            delay(200.milliseconds)
             synchronized(lock) {
                 if (!started) return@synchronized
                 audio[address] = AudioState.CONNECTED

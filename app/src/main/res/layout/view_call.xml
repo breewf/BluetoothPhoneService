@@ -200,10 +200,16 @@
 
         </LinearLayout>
 
+        <!--
+            音频切换与静音。
+            文案固定不拼接“（当前）”，当前所在端用 selected 状态高亮，
+            同时限制单行并放开 minWidth，避免长文案换行或被截断。
+        -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
+            android:baselineAligned="false"
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
@@ -212,7 +218,15 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="车机音频" />
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp"
+                android:text="车机音频"
+                android:textColor="@color/audio_button_text"
+                app:backgroundTint="@color/audio_button_background"
+                app:strokeColor="@color/audio_button_stroke" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnAudioPhone"
@@ -221,7 +235,15 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:text="手机音频" />
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp"
+                android:text="手机音频"
+                android:textColor="@color/audio_button_text"
+                app:backgroundTint="@color/audio_button_background"
+                app:strokeColor="@color/audio_button_stroke" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnMicMute"
@@ -230,7 +252,15 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:text="静音" />
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:minWidth="0dp"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp"
+                android:text="静音"
+                android:textColor="@color/audio_button_text"
+                app:backgroundTint="@color/audio_button_background"
+                app:strokeColor="@color/audio_button_stroke" />
 
         </LinearLayout>
 

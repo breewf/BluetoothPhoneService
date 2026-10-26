@@ -106,7 +106,7 @@ internal interface HfpGateway {
     /** 查询指定设备的 HFP 连接状态。 */
     fun connectionState(address: String): ProfileState
 
-    /** 主动拉取一次通话与 AG 状态。 */
+    /** 主动拉取一次通话列表、AG 与音频状态。 */
     fun refresh(address: String)
 
     /** 发起配对。 */

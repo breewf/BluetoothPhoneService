@@ -95,7 +95,7 @@ class BluetoothPhone private constructor(
     /** 已有一路接通（活动或保持）时加拨第二路；之后可接听等待/合并会议。 */
     suspend fun addCall(number: String): PhoneResult<Unit> = engine.addCall(number)
 
-    /** 接听普通来电。 */
+    /** 接听响铃中的一路：普通来电优先，其次是没有活动通话时的等待来电。 */
     suspend fun answer(): PhoneResult<Unit> = engine.answer()
 
     /** 拒接来电或第二路等待来电。 */
@@ -197,10 +197,15 @@ class BluetoothPhone private constructor(
         @JvmStatic
         fun get(context: Context): BluetoothPhone {
             instance?.let { return it }
-            val config = BluetoothPhoneConfig(
-                useMockGateway = !isSystemApiAvailable() || !hasPrivilegedPermission(context)
-            )
-            return init(context, config)
+            // 双重检查：并发首次获取时只创建一次实例，避免重复建链。
+            synchronized(this) {
+                instance?.let { return it }
+                val config = BluetoothPhoneConfig(
+                    useMockGateway = !isSystemApiAvailable() ||
+                        !hasPrivilegedPermission(context)
+                )
+                return init(context, config)
+            }
         }
 
         /** 停止并释放单例，下次使用会重新创建。 */

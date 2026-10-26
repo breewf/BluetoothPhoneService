@@ -306,8 +306,12 @@ data class PhoneCallState(
     val isVoipCall: Boolean
         get() = calls.any { it.isVoip } || conferencePeer?.isVoip == true
 
-    /** 是否可以接听普通来电。 */
-    val canAnswer: Boolean get() = incoming != null
+    /**
+     * 是否可以接听响铃中的一路：
+     * 普通来电，或没有活动通话时被 AG 单独上报的等待来电。
+     */
+    val canAnswer: Boolean
+        get() = incoming != null || (waiting != null && active == null)
 
     /** 是否可以拒接来电或第二路。 */
     val canReject: Boolean get() = incoming != null || waiting != null
@@ -318,7 +322,7 @@ data class PhoneCallState(
     /** 是否可以在活动/保持之间切换；有等待来电时 CHLD=2 会接听等待，故禁止。 */
     val canSwap: Boolean get() = active != null && held != null && waiting == null
 
-    /** 是否可以合并为会议；有等待来电、去电中或已是会议时不展示。 */
+    /** 是否可以合并为会议：需活动+保持两路，且无等待/去电，系统提供合并通道。 */
     val canMerge: Boolean
         get() = active != null && held != null && waiting == null && outgoing == null &&
             !active.isMultiParty && !held.isMultiParty && conferenceMergeSupported

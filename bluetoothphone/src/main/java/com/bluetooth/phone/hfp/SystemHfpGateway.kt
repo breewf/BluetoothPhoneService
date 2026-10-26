@@ -89,6 +89,9 @@ internal class SystemHfpGateway(
     /** 通话对象缓存：terminateCall 必须传回系统原始 call 对象。 */
     private val callRefs = ConcurrentHashMap<String, Any>()
 
+    /** 最近一次广播的音频状态，避免主动补查把宽带标记覆盖成窄带。 */
+    private val lastAudioState = ConcurrentHashMap<String, AudioState>()
+
     /** HFP Client 代理；由主线程的 ServiceListener/广播写入，引擎线程读取。 */
     @Volatile
     private var client: Any? = null
@@ -111,11 +114,18 @@ internal class SystemHfpGateway(
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
-                    val enabled = intent.getIntExtra(
-                        BluetoothAdapter.EXTRA_STATE,
-                        BluetoothAdapter.ERROR
-                    ) == BluetoothAdapter.STATE_ON
-                    _events.tryEmit(HfpEvent.AdapterChanged(enabled))
+                    // TURNING_ON/OFF 只是中间态，只按最终 ON/OFF 上报，避免提前清空通话。
+                    when (
+                        intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    ) {
+                        BluetoothAdapter.STATE_ON ->
+                            _events.tryEmit(HfpEvent.AdapterChanged(true))
+
+                        BluetoothAdapter.STATE_OFF ->
+                            _events.tryEmit(HfpEvent.AdapterChanged(false))
+
+                        else -> Unit
+                    }
                 }
 
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
@@ -133,15 +143,17 @@ internal class SystemHfpGateway(
 
                 ACTION_AUDIO_STATE_CHANGED -> {
                     val device = intent.device() ?: return
+                    val state = audioState(
+                        intent.getIntExtra(
+                            BluetoothProfile.EXTRA_STATE,
+                            BluetoothProfile.STATE_DISCONNECTED
+                        )
+                    )
+                    lastAudioState[device.address] = state
                     _events.tryEmit(
                         HfpEvent.AudioChanged(
                             address = device.address,
-                            state = audioState(
-                                intent.getIntExtra(
-                                    BluetoothProfile.EXTRA_STATE,
-                                    BluetoothProfile.STATE_DISCONNECTED
-                                )
-                            ),
+                            state = state,
                             wideband = intent.getBooleanExtra(EXTRA_AUDIO_WBS, false)
                         )
                     )
@@ -263,6 +275,7 @@ internal class SystemHfpGateway(
         }
         client = null
         callRefs.clear()
+        lastAudioState.clear()
     }
 
     /** 读取系统蓝牙开关状态。 */
@@ -294,11 +307,12 @@ internal class SystemHfpGateway(
         return profileState(invokeInt("getConnectionState", device) ?: 0)
     }
 
-    /** 主动拉取一次通话列表与 AG 状态。 */
+    /** 主动拉取一次通话列表、AG 与音频状态。 */
     override fun refresh(address: String) {
         val device = remoteDevice(address) ?: return
         refreshCalls(device)
         refreshAg(device)
+        refreshAudio(device)
     }
 
     /** 调用系统 API 配对；配对结果通过广播回传。 */
@@ -354,8 +368,11 @@ internal class SystemHfpGateway(
     /** 挂断指定通话；需要原始 call 对象。 */
     override fun hangup(address: String, callId: String): Boolean {
         val device = remoteDevice(address) ?: return false
-        // terminateCall 必须带上原始 call 对象，拿不到时交给上层重新刷新后再试。
-        val call = callRefs["$address|$callId"] ?: return false
+        // terminateCall 必须带原始 call 对象；缓存缺失时先刷新一次再重试。
+        val call = callRefs["$address|$callId"] ?: run {
+            refreshCalls(device)
+            callRefs["$address|$callId"] ?: return false
+        }
         return invokeBoolean("terminateCall", device, call)
     }
 
@@ -427,15 +444,17 @@ internal class SystemHfpGateway(
             addAction(ACTION_AG_EVENT)
             addAction(ACTION_CALL_CHANGED)
         }
+        // 系统蓝牙广播来自系统进程，必须使用 RECEIVER_EXPORTED 才能收到。
         context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
         receiverRegistered = true
     }
 
-    /** 重新拉取所有已连接设备的通话与 AG 状态。 */
+    /** 重新拉取所有已连接设备的通话、AG 与音频状态。 */
     private fun refreshAll() {
         connectedDevices().forEach { device ->
             refreshCalls(device)
             refreshAg(device)
+            refreshAudio(device)
         }
     }
 
@@ -491,6 +510,16 @@ internal class SystemHfpGateway(
                 )
             )
         )
+    }
+
+    /** 补查 SCO/eSCO：车机启动时音频可能已经连接，不能只等广播。 */
+    private fun refreshAudio(device: BluetoothDevice) {
+        val current = invoke("getAudioState", device) as? Int ?: return
+        val state = audioState(current)
+        // 广播已经同步过的状态无需重复上报，避免覆盖广播里的宽带标记。
+        if (lastAudioState[device.address] == state) return
+        lastAudioState[device.address] = state
+        _events.tryEmit(HfpEvent.AudioChanged(device.address, state, false))
     }
 
     /** 读取当前已连接 HFP 的设备。 */
@@ -610,11 +639,14 @@ internal class SystemHfpGateway(
         else -> BondState.UNKNOWN
     }
 
-    /** 系统 HFP 音频状态（0/1/2）→ 内部状态。 */
+    /**
+     * 系统 HFP 音频状态 → 内部状态。
+     * HFP Client 广播使用 10/11/12，0/1/2 兼容旧版与部分厂商栈。
+     */
     private fun audioState(value: Int): AudioState = when (value) {
-        0 -> AudioState.DISCONNECTED
-        1 -> AudioState.CONNECTING
-        2 -> AudioState.CONNECTED
+        0, 10 -> AudioState.DISCONNECTED
+        1, 11 -> AudioState.CONNECTING
+        2, 12 -> AudioState.CONNECTED
         else -> AudioState.UNKNOWN
     }
 

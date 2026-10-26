@@ -10,6 +10,7 @@ import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * PBAP = Phone Book Access Profile，即「电话本访问协议」，蓝牙 SIG 定义的标准 Profile 之一，用于在车机与手机之间同步通讯录和通话记录。
  * PBAP Client 只负责把手机电话本/通话记录同步到系统 ContactsProvider。
  * AOSP 没有公开“下载电话本”的 API，数据读取统一走 ContactRepository。
  */
@@ -65,7 +66,7 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
     private var client: Any? = null
 
     @Volatile
-    private var started = false
+    private var proxyRequested = false
 
     /** 等待代理就绪后需要连接的设备。 */
     private val pending = ConcurrentHashMap.newKeySet<String>()
@@ -88,23 +89,26 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
             }
         }
 
-        /** 代理断开时清空引用。 */
+        /** 代理断开时清空引用，允许重新申请。 */
         override fun onServiceDisconnected(profile: Int) {
-            if (profile == PROFILE_PBAP_CLIENT) client = null
+            if (profile != PROFILE_PBAP_CLIENT) return
+            client = null
+            // 不重置会在系统回收代理后永久无法重新获取，PBAP 同步随之失效。
+            proxyRequested = false
         }
     }
 
     /** 获取 PBAP Client 代理；重复调用不会重复请求。 */
     override fun start() {
-        if (started) return
-        started = runCatching {
+        if (proxyRequested) return
+        proxyRequested = runCatching {
             adapter?.getProfileProxy(context, listener, PROFILE_PBAP_CLIENT) ?: false
         }.getOrDefault(false)
     }
 
     /** 关闭代理并清理待连接队列。 */
     override fun stop() {
-        started = false
+        proxyRequested = false
         val proxy = client as? BluetoothProfile
         if (proxy != null) {
             runCatching { adapter?.closeProfileProxy(PROFILE_PBAP_CLIENT, proxy) }

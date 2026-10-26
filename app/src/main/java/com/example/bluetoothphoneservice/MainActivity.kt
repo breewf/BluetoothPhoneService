@@ -280,17 +280,14 @@ class MainActivity : AppCompatActivity() {
             // 有保持中的通话才能单独挂断
             btnHangupHeld.isVisible = call.canHangupHeld
 
-            // 音频按钮直接标明当前所在端，无通话时禁用
+            // 音频按钮：文案固定，用 selected 状态高亮当前所在端，避免换行
             btnAudioCar.isEnabled = call.canToggleAudio
             btnAudioPhone.isEnabled = call.canToggleAudio
-            btnAudioCar.renderText(
-                if (call.audioRoute == AudioRoute.CAR) "车机音频（当前）" else "车机音频"
-            )
-            btnAudioPhone.renderText(
-                if (call.audioRoute == AudioRoute.PHONE) "手机音频（当前）" else "手机音频"
-            )
-            // 麦克风静音开关，仅通话中存在
+            btnAudioCar.isSelected = call.audioRoute == AudioRoute.CAR
+            btnAudioPhone.isSelected = call.audioRoute == AudioRoute.PHONE
+            // 麦克风静音开关，仅通话中存在；已静音时保持高亮
             btnMicMute.isVisible = call.canToggleMic
+            btnMicMute.isSelected = call.micMuted
             btnMicMute.renderText(if (call.micMuted) "取消静音" else "静音")
         }
 
@@ -386,11 +383,14 @@ class MainActivity : AppCompatActivity() {
             calls.forEach { item ->
                 val row = ItemCallBinding.inflate(layoutInflater, callsContainer, false)
                 val title = item.title()
-                // 通话标题：联系人/号码，会议追加标记
-                row.tvCallTitle.text =
-                    if (item.isMultiParty && title != "会议通话") "$title（会议）" else title
+                // 会议本身没有号码时标题已是“会议通话”，不再追加后缀
+                row.tvCallTitle.text = if (item.isMultiParty && !item.number.isNullOrBlank()) {
+                    "$title（会议）"
+                } else {
+                    title
+                }
                 // 通话状态与方向
-                row.tvCallState.text = "${item.state.label()}  ${item.direction.name}"
+                row.tvCallState.text = "${item.state.label()}  ${item.direction.label()}"
                 // 时长先隐藏，由 renderDurations 根据是否接通决定
                 row.tvCallDuration.isVisible = false
                 callRows[item.id] = row
@@ -448,10 +448,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
-        /** 演示所需运行时权限。 */
+        /**
+         * 演示所需运行时权限。
+         * HFP Client 只依赖 BLUETOOTH_CONNECT；不请求 BLUETOOTH_SCAN，
+         * 它在 Android 12+ 容易被归为定位用途，被拒后不应影响通话。
+         */
         val REQUIRED_PERMISSIONS = arrayOf(
             Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.READ_CALL_LOG
         )
