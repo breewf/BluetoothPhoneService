@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- 车机演示界面配色 -->
+    <color name="brand_primary">#1565C0</color>
+    <color name="brand_on_primary">#FFFFFF</color>
+    <color name="brand_primary_container">#D6E4FF</color>
+    <color name="brand_on_primary_container">#0B2A4A</color>
+    <color name="app_surface">#F5F8FC</color>
+    <color name="app_surface_variant">#E8EEF6</color>
+    <color name="app_outline">#D3DCE8</color>
+    <color name="app_text_secondary">#5B6572</color>
+    <color name="warning_container">#FFF3D6</color>
+    <color name="warning_text">#6B4A00</color>
+</resources>

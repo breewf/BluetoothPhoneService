@@ -1,0 +1,23 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+
+# Gradle 构建产物：含根工程与各子模块
+**/build/
+# Kotlin 增量编译与会话缓存
+.kotlin/
+# IDEA 运行期状态
+/.idea/shelf/
+/.idea/httpRequests/
+
+/captures
+.externalNativeBuild
+.cxx
+local.properties
