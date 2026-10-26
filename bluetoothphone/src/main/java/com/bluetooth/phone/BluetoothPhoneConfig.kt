@@ -1,6 +1,7 @@
 package com.bluetooth.phone
 
 import com.bluetooth.phone.api.CallClassifier
+import com.bluetooth.phone.api.PhoneLogLevel
 
 /**
  * 中间件运行参数。
@@ -24,8 +25,14 @@ data class BluetoothPhoneConfig @JvmOverloads constructor(
     val conferenceVendorId: Int = 0,
     /** 厂商 AT 通道发送的会议合并命令。 */
     val conferenceAtCommand: String = "+CHLD=3",
-    /** 日志 TAG，便于车机日志过滤。 */
+    /** 日志 TAG，便于车机日志过滤，默认 BluetoothPhone。 */
     val logTag: String = "BluetoothPhone",
+    /**
+     * 日志级别，默认 [PhoneLogLevel.INFO]。
+     * 量产可降到 [PhoneLogLevel.WARN] 或 [PhoneLogLevel.NONE]；
+     * 现场排查可用 [com.bluetooth.phone.BluetoothPhone.setLogLevel] 动态调高。
+     */
+    val logLevel: PhoneLogLevel = PhoneLogLevel.INFO,
     /**
      * 号码来源分类器，用于识别微信/VoIP 等网络电话。
      * HFP 不携带应用信息，默认返回 [com.bluetooth.phone.api.CallKind.UNKNOWN]。

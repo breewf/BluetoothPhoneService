@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import com.bluetooth.phone.core.PhoneLog
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
@@ -83,6 +84,7 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile?) {
             if (profile != PROFILE_PBAP_CLIENT) return
             client = proxy
+            PhoneLog.pbap.d { "PBAP 代理就绪，待连接 ${pending.size} 台" }
             pending.toList().forEach {
                 attempted += it
                 connectNow(it)
@@ -95,12 +97,14 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
             client = null
             // 不重置会在系统回收代理后永久无法重新获取，PBAP 同步随之失效。
             proxyRequested = false
+            PhoneLog.pbap.w { "PBAP 代理断开，等待重新申请" }
         }
     }
 
     /** 获取 PBAP Client 代理；重复调用不会重复请求。 */
     override fun start() {
         if (proxyRequested) return
+        PhoneLog.pbap.d { "请求 PBAP Client 代理" }
         proxyRequested = runCatching {
             adapter?.getProfileProxy(context, listener, PROFILE_PBAP_CLIENT) ?: false
         }.getOrDefault(false)
@@ -109,6 +113,7 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
     /** 关闭代理并清理待连接队列。 */
     override fun stop() {
         proxyRequested = false
+        PhoneLog.pbap.d { "停止 PBAP 同步" }
         val proxy = client as? BluetoothProfile
         if (proxy != null) {
             runCatching { adapter?.closeProfileProxy(PROFILE_PBAP_CLIENT, proxy) }
@@ -121,12 +126,16 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
     /** 记录待连接设备；代理未就绪时等 onServiceConnected 再执行。 */
     override fun connect(address: String): Boolean {
         pending += address
-        if (attempted.add(address)) connectNow(address)
+        if (attempted.add(address)) {
+            PhoneLog.pbap.d { "PBAP 触发同步: $address" }
+            connectNow(address)
+        }
         return true
     }
 
     /** 断开指定设备的 PBAP 同步。 */
     override fun disconnect(address: String) {
+        PhoneLog.pbap.d { "PBAP 断开: $address" }
         pending -= address
         attempted -= address
         val device = remote(address) ?: return
@@ -147,8 +156,13 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
     /** 反射调用 BluetoothPbapClient 的 connect/disconnect。 */
     private fun invoke(name: String, vararg args: Any?): Any? {
         val target = client ?: return null
-        val method = method(name, args.size) ?: return null
-        return runCatching { method.invoke(target, *args) }.getOrNull()
+        val method = method(name, args.size) ?: run {
+            PhoneLog.pbap.d { "PBAP 方法不存在: $name/${args.size}" }
+            return null
+        }
+        return runCatching { method.invoke(target, *args) }
+            .onFailure { PhoneLog.pbap.w(it) { "PBAP $name 调用失败" } }
+            .getOrNull()
     }
 
     /** 按名称+参数个数查找并缓存方法。 */

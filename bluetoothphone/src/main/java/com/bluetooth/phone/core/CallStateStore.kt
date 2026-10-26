@@ -58,6 +58,7 @@ internal class CallStateStore(
 
     /** 切换当前设备并重新计算对外的 [state]。 */
     fun selectDevice(address: String, name: String?) {
+        PhoneLog.state.d { "切换数据源: $address (${name ?: "<未知>"})" }
         currentDeviceId = address
         currentDeviceName = name
         recompute()
@@ -117,6 +118,11 @@ internal class CallStateStore(
 
         callsByDevice[deviceId] = mapped
         rememberConferencePeer(deviceId, previous.values, mapped)
+        // 归并输入留痕：排查“第二路为何没显示”时看这里。
+        PhoneLog.state.d {
+            "归并 $deviceId: ${mapped.size} 路 [" +
+                mapped.joinToString { "${it.state}:${PhoneLog.mask(it.number)}" } + "]"
+        }
 
         if (mapped.isNotEmpty() && currentDeviceId?.let { callsByDevice[it] }.isNullOrEmpty()) {
             currentDeviceId = deviceId
@@ -131,6 +137,7 @@ internal class CallStateStore(
 
     /** 设备断开时清空其通话与音频，并选出新的当前设备。 */
     fun clearDevice(deviceId: String) {
+        PhoneLog.state.d { "清理设备通话: $deviceId" }
         callsByDevice.remove(deviceId)
         audioByDevice.remove(deviceId)
         conferencePeers.remove(deviceId)
@@ -149,12 +156,14 @@ internal class CallStateStore(
         }
         conferencePeers.replaceAll { _, call -> call.withContact(contactMatch(call.number)) }
         recompute()
+        PhoneLog.state.d { "联系人映射更新: ${matches.size} 个号码" }
     }
 
     /** 更新会议合并能力；能力变化后 [PhoneCallState.canMerge] 会同步变化。 */
     fun setConferenceMergeSupported(supported: Boolean) {
         if (conferenceMergeSupported == supported) return
         conferenceMergeSupported = supported
+        PhoneLog.state.i { "会议合并能力: $supported" }
         recompute()
     }
 
@@ -167,6 +176,7 @@ internal class CallStateStore(
 
     /** 清空全部设备状态（蓝牙关闭时使用），保留会议能力标记。 */
     fun clearAll() {
+        PhoneLog.state.d { "清空全部通话状态" }
         callsByDevice.clear()
         audioByDevice.clear()
         conferencePeers.clear()
@@ -199,6 +209,9 @@ internal class CallStateStore(
             it.id != conference.id && (it.isHeld || it.state == CallState.WAITING)
         } ?: return
         conferencePeers[deviceId] = peer
+        PhoneLog.state.i {
+            "记录会议对方: ${PhoneLog.mask(peer.number)} (callId=${peer.id})"
+        }
     }
 
     /** 把扁平通话列表归并为 active/held/incoming/waiting/conference 与 UI 阶段。 */
@@ -207,6 +220,9 @@ internal class CallStateStore(
         val active = calls.firstOrNull { it.state == CallState.ACTIVE }
         // 部分 AG 会把第二路来电上报成 INCOMING，有活动通话时统一归一化为等待来电。
         val normalizedCalls = if (active != null) {
+            if (calls.any { it.state == CallState.INCOMING }) {
+                PhoneLog.state.d { "AG 将第二路上报为 INCOMING，已归一化为 WAITING" }
+            }
             calls.map {
                 if (it.state == CallState.INCOMING) it.copy(state = CallState.WAITING) else it
             }

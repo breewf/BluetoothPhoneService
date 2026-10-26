@@ -13,12 +13,13 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
-import android.util.Log
 import com.bluetooth.phone.BluetoothPhoneConfig
 import com.bluetooth.phone.api.AudioState
 import com.bluetooth.phone.api.BondState
 import com.bluetooth.phone.api.CallState
+import com.bluetooth.phone.api.PhoneLogLevel
 import com.bluetooth.phone.api.ProfileState
+import com.bluetooth.phone.core.PhoneLog
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -86,6 +87,9 @@ internal class SystemHfpGateway(
     /** 反射方法缓存，只缓存找到的方法，避免 ConcurrentHashMap 存 null。 */
     private val methodCache = ConcurrentHashMap<String, Method>()
 
+    /** 不存在的方法只探测一次，避免反复反射并刷日志。 */
+    private val missingMethods = ConcurrentHashMap.newKeySet<String>()
+
     /** 通话对象缓存：terminateCall 必须传回系统原始 call 对象。 */
     private val callRefs = ConcurrentHashMap<String, Any>()
 
@@ -112,6 +116,8 @@ internal class SystemHfpGateway(
     /** 系统蓝牙广播 → 统一网关事件。 */
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            // 广播是状态变化的最初来源；VERBOSE 级留痕，避免高频事件刷屏。
+            PhoneLog.hfp.v { "广播 ${intent.action}" }
             when (intent.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED -> {
                     // TURNING_ON/OFF 只是中间态，只按最终 ON/OFF 上报，避免提前清空通话。
@@ -179,6 +185,7 @@ internal class SystemHfpGateway(
             if (profile != PROFILE_HEADSET_CLIENT) return
             proxyRequested = false
             client = proxy
+            PhoneLog.hfp.i { "HFP Client 代理就绪" }
             // getProfileProxy 是异步的；代理就绪后补发一次已连接状态，
             // 否则启动瞬间拿到的 DISCONNECTED 会一直留在设备列表里。
             connectedDevices().forEach { device ->
@@ -196,6 +203,7 @@ internal class SystemHfpGateway(
             proxyRequested = false
             client = null
             callRefs.clear()
+            PhoneLog.hfp.w { "HFP Client 代理断开，等待重建" }
             // 主动 stop() 时 started 已置 false，不应触发重连。
             if (started) _events.tryEmit(HfpEvent.ServiceLost)
         }
@@ -218,30 +226,40 @@ internal class SystemHfpGateway(
     override fun start() {
         if (!started) {
             started = true
+            PhoneLog.hfp.i { "HFP 网关启动" }
             if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
                 != PackageManager.PERMISSION_GRANTED
             ) {
+                PhoneLog.hfp.w { "缺少 BLUETOOTH_CONNECT 权限" }
                 _events.tryEmit(HfpEvent.AdapterChanged(false))
                 _events.tryEmit(HfpEvent.Error("缺少 BLUETOOTH_CONNECT 权限"))
             }
             if (context.checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED")
                 != PackageManager.PERMISSION_GRANTED
             ) {
+                PhoneLog.hfp.w { "缺少 BLUETOOTH_PRIVILEGED，HFP Client 不可用" }
                 _events.tryEmit(HfpEvent.Error("HFP Client 需要系统签名与 BLUETOOTH_PRIVILEGED"))
             }
             if (clientClass == null) {
+                PhoneLog.hfp.e { "当前系统不包含 BluetoothHeadsetClient" }
                 _events.tryEmit(HfpEvent.Error("当前系统不包含 BluetoothHeadsetClient"))
             }
-            _events.tryEmit(HfpEvent.AdapterChanged(isBluetoothEnabled()))
+            val enabled = isBluetoothEnabled()
+            PhoneLog.hfp.i { "蓝牙开关: ${if (enabled) "开" else "关"}" }
+            _events.tryEmit(HfpEvent.AdapterChanged(enabled))
         }
 
         // 权限可能在运行中才授予，重复调用 start() 时补注册、补拿代理。
         if (!receiverRegistered) {
             runCatching { registerReceiver() }
-                .onFailure { _events.tryEmit(HfpEvent.Error("注册蓝牙广播失败: ${it.message}")) }
+                .onFailure {
+                    PhoneLog.hfp.w(it) { "注册蓝牙广播失败" }
+                    _events.tryEmit(HfpEvent.Error("注册蓝牙广播失败: ${it.message}"))
+                }
         }
         if (client == null && !proxyRequested) {
             proxyRequested = true
+            PhoneLog.hfp.d { "请求 HFP Client 代理" }
             if (!requestProxy()) proxyRequested = false
         }
     }
@@ -251,10 +269,12 @@ internal class SystemHfpGateway(
         val requested = runCatching {
             adapter?.getProfileProxy(context, serviceListener, PROFILE_HEADSET_CLIENT) ?: false
         }.getOrElse {
+            PhoneLog.hfp.w(it) { "获取 HFP Client 代理异常" }
             _events.tryEmit(HfpEvent.Error("获取 HFP Client 代理失败: ${it.message}"))
             false
         }
         if (!requested) {
+            PhoneLog.hfp.w { "HFP Client 代理不可用，请检查系统签名/蓝牙状态" }
             _events.tryEmit(HfpEvent.Error("HFP Client 代理不可用，请检查系统签名/蓝牙状态"))
         }
         return requested
@@ -264,6 +284,7 @@ internal class SystemHfpGateway(
     override fun stop() {
         if (!started) return
         started = false
+        PhoneLog.hfp.i { "HFP 网关停止" }
         proxyRequested = false
         if (receiverRegistered) {
             runCatching { context.unregisterReceiver(receiver) }
@@ -370,6 +391,7 @@ internal class SystemHfpGateway(
         val device = remoteDevice(address) ?: return false
         // terminateCall 必须带原始 call 对象；缓存缺失时先刷新一次再重试。
         val call = callRefs["$address|$callId"] ?: run {
+            PhoneLog.hfp.d { "hangup($callId): 原始 call 缓存缺失，刷新后重试" }
             refreshCalls(device)
             callRefs["$address|$callId"] ?: return false
         }
@@ -412,11 +434,18 @@ internal class SystemHfpGateway(
 
         // 部分芯片/车机栈会在 BluetoothHeadsetClient 上补会议合并方法。
         listOf("conferenceCall", "mergeCall", "mergeCalls").forEach { name ->
-            if (method(name, 1) != null && invokeBoolean(name, device)) return true
+            if (method(name, 1) != null) {
+                PhoneLog.hfp.d { "会议合并: 尝试厂商方法 $name" }
+                if (invokeBoolean(name, device)) return true
+            }
         }
 
         // AOSP 14 的兜底：允许通过厂商 AT 通道发送 CHLD=3。
-        return method("sendVendorAtCommand", 3) != null && invokeBoolean(
+        val vendorAt = method("sendVendorAtCommand", 3)
+        if (vendorAt != null) {
+            PhoneLog.hfp.d { "会议合并: 使用厂商 AT 通道 ${config.conferenceAtCommand}" }
+        }
+        return vendorAt != null && invokeBoolean(
             "sendVendorAtCommand",
             device,
             config.conferenceVendorId,
@@ -447,6 +476,7 @@ internal class SystemHfpGateway(
         // 系统蓝牙广播来自系统进程，必须使用 RECEIVER_EXPORTED 才能收到。
         context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
         receiverRegistered = true
+        PhoneLog.hfp.d { "蓝牙广播已注册" }
     }
 
     /** 重新拉取所有已连接设备的通话、AG 与音频状态。 */
@@ -462,6 +492,18 @@ internal class SystemHfpGateway(
     private fun refreshCalls(device: BluetoothDevice) {
         val rawList = invoke("getCurrentCalls", device) as? List<*> ?: return
         val calls = rawList.mapNotNull { raw -> rawCall(raw) }
+        PhoneLog.hfp.d {
+            "通话列表 ${device.address}: 原始 ${rawList.size} 路，有效 ${calls.size} 路"
+        }
+        // 只有 VERBOSE 才展开每一路，避免高频事件刷屏。
+        if (PhoneLog.hfp.isEnabled(PhoneLogLevel.VERBOSE)) {
+            calls.forEach {
+                PhoneLog.hfp.v {
+                    "  call id=${it.id}, state=${it.state}, number=${PhoneLog.mask(it.number)}, " +
+                        "multi=${it.isMultiParty}, outgoing=${it.isOutgoing}, ring=${it.isInBandRing}"
+                }
+            }
+        }
 
         callRefs.keys.removeAll { it.startsWith("${device.address}|") }
         rawList.forEach { raw ->
@@ -498,6 +540,7 @@ internal class SystemHfpGateway(
     /** 拉取 AG 上报的电量/信号/运营商/带内铃声。 */
     private fun refreshAg(device: BluetoothDevice) {
         val bundle = invoke("getCurrentAgEvents", device) as? Bundle ?: return
+        PhoneLog.hfp.v { "AG 事件 ${device.address}: $bundle" }
         _events.tryEmit(
             HfpEvent.AgChanged(
                 device.address,
@@ -518,6 +561,7 @@ internal class SystemHfpGateway(
         val state = audioState(current)
         // 广播已经同步过的状态无需重复上报，避免覆盖广播里的宽带标记。
         if (lastAudioState[device.address] == state) return
+        PhoneLog.hfp.d { "音频补查 ${device.address}: raw=$current -> $state" }
         lastAudioState[device.address] = state
         _events.tryEmit(HfpEvent.AudioChanged(device.address, state, false))
     }
@@ -541,9 +585,16 @@ internal class SystemHfpGateway(
     private fun method(name: String, argCount: Int): Method? {
         val key = "$name/$argCount"
         methodCache[key]?.let { return it }
+        // 否定结果也缓存：系统方法表不会在运行期变化，避免反复反射。
+        if (key in missingMethods) return null
         val found = clientClass?.methods?.firstOrNull {
             it.name == name && it.parameterCount == argCount
-        } ?: return null
+        }
+        if (found == null) {
+            missingMethods += key
+            PhoneLog.hfp.v { "反射方法不存在: $key" }
+            return null
+        }
         methodCache[key] = found
         return found
     }
@@ -591,7 +642,7 @@ internal class SystemHfpGateway(
 
     /** 记录反射异常并上报一次错误事件。 */
     private fun reportInvokeError(name: String, error: Throwable) {
-        Log.w(config.logTag, "$name failed: ${error.javaClass.simpleName}: ${error.message}")
+        PhoneLog.hfp.w(error) { "HFP $name 调用失败" }
         _events.tryEmit(HfpEvent.Error("HFP $name 调用失败: ${error.message ?: error.javaClass.simpleName}"))
     }
 
@@ -600,6 +651,7 @@ internal class SystemHfpGateway(
         if (missingPrivilegedReported) return
         if (error is SecurityException) {
             missingPrivilegedReported = true
+            PhoneLog.hfp.w(error) { "蓝牙操作被拒绝，请检查系统签名/BLUETOOTH_PRIVILEGED" }
             _events.tryEmit(HfpEvent.Error("蓝牙操作被拒绝，请检查系统签名/BLUETOOTH_PRIVILEGED"))
         }
     }

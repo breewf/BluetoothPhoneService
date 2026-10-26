@@ -63,6 +63,18 @@ internal sealed interface HfpEvent {
 
     /** 网关内部错误，向上转为 PhoneEvent.Error。 */
     data class Error(val message: String) : HfpEvent
+
+    /** 日志摘要：只输出类型与关键字段，不展开完整 call 列表。 */
+    fun summary(): String = when (this) {
+        is AdapterChanged -> "AdapterChanged(enabled=$enabled)"
+        is BondChanged -> "BondChanged($address)"
+        is ConnectionChanged -> "ConnectionChanged($address, $state)"
+        is AudioChanged -> "AudioChanged($address, $state, wideband=$wideband)"
+        is CallsChanged -> "CallsChanged($address, ${calls.size} 路)"
+        is AgChanged -> "AgChanged($address, battery=${ag.battery}, signal=${ag.signal})"
+        ServiceLost -> "ServiceLost"
+        is Error -> "Error($message)"
+    }
 }
 
 /** 接听策略，对应 HFP AT+CHLD 的不同分支。 */

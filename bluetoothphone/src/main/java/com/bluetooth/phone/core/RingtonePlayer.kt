@@ -25,8 +25,15 @@ internal class RingtonePlayer(context: Context) {
         // 主叫来电循环响铃；等待来电只响一轮。
         val shouldLoop = state.incoming != null && !state.incoming.isInBandRing
         when {
-            shouldRing && (!ringing || looping != shouldLoop) -> start(shouldLoop)
-            !shouldRing && ringing -> stop()
+            shouldRing && (!ringing || looping != shouldLoop) -> {
+                PhoneLog.audio.d { "本地铃声开始, loop=$shouldLoop" }
+                start(shouldLoop)
+            }
+
+            !shouldRing && ringing -> {
+                PhoneLog.audio.d { "本地铃声停止" }
+                stop()
+            }
         }
     }
 
@@ -41,14 +48,23 @@ internal class RingtonePlayer(context: Context) {
     /** 开始播放系统默认铃声，[loop] 控制是否循环。 */
     private fun start(loop: Boolean) {
         stop()
-        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE) ?: return
-        val tone = RingtoneManager.getRingtone(appContext, uri) ?: return
+        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE) ?: run {
+            PhoneLog.audio.w { "没有可用的系统默认铃声" }
+            return
+        }
+        val tone = RingtoneManager.getRingtone(appContext, uri) ?: run {
+            PhoneLog.audio.w { "无法创建铃声实例" }
+            return
+        }
         tone.audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
         tone.isLooping = loop
-        runCatching { tone.play() }.onFailure { return }
+        runCatching { tone.play() }.onFailure {
+            PhoneLog.audio.w(it) { "铃声播放失败" }
+            return
+        }
         ringtone = tone
         ringing = true
         looping = loop

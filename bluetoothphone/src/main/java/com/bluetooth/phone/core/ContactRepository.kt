@@ -79,8 +79,12 @@ internal class ContactRepository(private val context: Context) {
                     )
                 }
             }
+        }.onFailure {
+            PhoneLog.contact.w(it) { "读取联系人失败" }
         }
-        result.distinctBy { it.number }
+        val distinct = result.distinctBy { it.number }
+        PhoneLog.contact.d { "读取联系人: ${distinct.size} 条（上限 $limit）" }
+        distinct
     }
 
     /** 读取最近通话记录（IO 线程），按时间倒序。 */
@@ -121,7 +125,10 @@ internal class ContactRepository(private val context: Context) {
                     )
                 }
             }
+        }.onFailure {
+            PhoneLog.contact.w(it) { "读取通话记录失败" }
         }
+        PhoneLog.contact.d { "读取通话记录: ${result.size} 条（上限 $limit）" }
         result
     }
 }

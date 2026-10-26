@@ -51,11 +51,15 @@ internal class DeviceRegistry {
         }
         ensureActive()
         publish()
+        PhoneLog.device.d { "设备列表更新: ${map.size} 台" }
     }
 
     /** 更新 HFP 连接状态；没有可用当前设备时才接管焦点。 */
     fun updateConnection(address: String, state: ProfileState) {
         val current = map[address] ?: return
+        if (current.hfpState != state) {
+            PhoneLog.device.d { "HFP 状态: $address ${current.hfpState} -> $state" }
+        }
         map[address] = current.copy(hfpState = state)
         // 已有可用当前设备时不抢焦点，避免第二台手机连接打断正在进行的通话。
         if (state == ProfileState.CONNECTED) {
@@ -69,6 +73,7 @@ internal class DeviceRegistry {
     /** 标记为连接中，让界面立即有反馈。 */
     fun markConnecting(address: String) {
         val current = map[address] ?: return
+        PhoneLog.device.d { "标记连接中: $address" }
         map[address] = current.copy(hfpState = ProfileState.CONNECTING)
         publish()
     }
@@ -76,18 +81,28 @@ internal class DeviceRegistry {
     /** 更新 AG 上报的电量/信号/运营商。 */
     fun updateAg(address: String, ag: HfpAgState) {
         val current = map[address] ?: return
-        map[address] = current.copy(
+        val updated = current.copy(
             battery = ag.battery ?: current.battery,
             signal = ag.signal ?: current.signal,
             roaming = ag.roaming ?: current.roaming,
             operatorName = ag.operatorName ?: current.operatorName
         )
+        // 信号/电量可能频繁上报，只在内容真正变化时记录。
+        if (updated == current) return
+        PhoneLog.device.v {
+            "AG 状态: $address battery=${updated.battery}, signal=${updated.signal}, " +
+                "roaming=${updated.roaming}, operator=${updated.operatorName}"
+        }
+        map[address] = updated
         publish()
     }
 
     /** 更新通话音频状态。 */
     fun updateAudio(address: String, state: AudioState) {
         val current = map[address] ?: return
+        if (current.audioState != state) {
+            PhoneLog.device.d { "音频状态: $address ${current.audioState} -> $state" }
+        }
         map[address] = current.copy(audioState = state)
         publish()
     }
@@ -95,6 +110,9 @@ internal class DeviceRegistry {
     /** 指定当前设备，并同步 isActive 标记。 */
     fun select(address: String) {
         if (map[address] == null) return
+        if (_activeAddress.value != address) {
+            PhoneLog.device.d { "当前设备: ${_activeAddress.value} -> $address" }
+        }
         _activeAddress.value = address
         syncActiveFlags()
         publish()
@@ -108,6 +126,7 @@ internal class DeviceRegistry {
 
     /** 蓝牙关闭时清空连接与音频状态。 */
     fun clearConnections() {
+        PhoneLog.device.i { "清空全部连接状态" }
         map.keys.forEach { key ->
             map[key] = map.getValue(key).copy(
                 hfpState = ProfileState.DISCONNECTED,

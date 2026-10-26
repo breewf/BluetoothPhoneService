@@ -10,8 +10,10 @@ import com.bluetooth.phone.api.PhoneCallState
 import com.bluetooth.phone.api.PhoneConnectionState
 import com.bluetooth.phone.api.PhoneDevice
 import com.bluetooth.phone.api.PhoneEvent
+import com.bluetooth.phone.api.PhoneLogLevel
 import com.bluetooth.phone.api.PhoneResult
 import com.bluetooth.phone.core.PhoneEngine
+import com.bluetooth.phone.core.PhoneLog
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -182,6 +184,14 @@ class BluetoothPhone private constructor(
             config: BluetoothPhoneConfig = BluetoothPhoneConfig()
         ): BluetoothPhone {
             synchronized(this) {
+                // 日志配置先于实例创建，保证初始化过程本身也能被记录。
+                PhoneLog.level = config.logLevel
+                PhoneLog.tag = config.logTag
+                PhoneLog.phone.i {
+                    "init: mock=${config.useMockGateway}, " +
+                        "autoConnect=${config.autoConnectLastDevice}, " +
+                        "autoReconnect=${config.autoReconnect}, log=${config.logLevel}"
+                }
                 instance?.release()
                 val created = BluetoothPhone(context.applicationContext, config)
                 instance = created
@@ -204,6 +214,10 @@ class BluetoothPhone private constructor(
                     useMockGateway = !isSystemApiAvailable() ||
                         !hasPrivilegedPermission(context)
                 )
+                // 静默降级到 Mock 会让界面“看起来正常”，必须留一条警告。
+                PhoneLog.phone.w {
+                    "get(): 未显式 init，按系统能力自动降级，mock=${config.useMockGateway}"
+                }
                 return init(context, config)
             }
         }
@@ -212,10 +226,31 @@ class BluetoothPhone private constructor(
         @JvmStatic
         fun shutdown() {
             synchronized(this) {
+                PhoneLog.phone.i { "shutdown(): 释放单例" }
                 instance?.release()
                 instance = null
             }
         }
+
+        /**
+         * 运行期调整日志级别，用于现场排查；不需要重启中间层。
+         * 排查完成后建议恢复到量产级别。
+         */
+        @JvmStatic
+        fun setLogLevel(level: PhoneLogLevel) {
+            PhoneLog.level = level
+            PhoneLog.phone.i { "日志级别切换为 $level" }
+        }
+
+        /** 运行期调整日志 TAG；空白值忽略。 */
+        @JvmStatic
+        fun setLogTag(tag: String) {
+            if (tag.isNotBlank()) PhoneLog.tag = tag
+        }
+
+        /** 当前日志级别，便于设置页展示。 */
+        @JvmStatic
+        fun currentLogLevel(): PhoneLogLevel = PhoneLog.level
 
         /** 当前系统是否包含 @SystemApi 的 BluetoothHeadsetClient。 */
         @JvmStatic

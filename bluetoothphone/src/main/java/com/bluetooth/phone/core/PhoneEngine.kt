@@ -153,6 +153,7 @@ internal class PhoneEngine(
         scope.launch {
             if (started) {
                 // 重复 start() 只做补偿：网关自行重试代理，不重建整条链路。
+                PhoneLog.engine.d { "start(): 已在运行，执行补偿启动" }
                 if (!gateway.isReady) gateway.start()
                 pbap.start()
                 refreshDevices()
@@ -161,6 +162,9 @@ internal class PhoneEngine(
             }
             started = true
             adapterEnabled = gateway.isBluetoothEnabled()
+            PhoneLog.engine.i {
+                "start(): mock=$isMock, 蓝牙=${if (adapterEnabled) "开" else "关"}"
+            }
             gateway.start()
             pbap.start()
             refreshDevices()
@@ -174,6 +178,7 @@ internal class PhoneEngine(
         scope.launch {
             if (!started) return@launch
             started = false
+            PhoneLog.engine.i { "stop(): 主动停止，清理设备与通话状态" }
             gateway.stop()
             pbap.stop()
             ringtone.stop()
@@ -194,6 +199,7 @@ internal class PhoneEngine(
      */
     fun shutdown() {
         started = false
+        PhoneLog.engine.i { "shutdown(): 释放引擎与线程" }
         runCatching { gateway.stop() }
         runCatching { pbap.stop() }
         ringtone.stop()
@@ -212,6 +218,7 @@ internal class PhoneEngine(
     fun refresh() {
         scope.launch {
             if (!started) return@launch
+            PhoneLog.engine.d { "refresh(): 主动刷新设备与通话" }
             if (!gateway.isReady) gateway.start()
             pbap.start()
             refreshDevices()
@@ -224,14 +231,21 @@ internal class PhoneEngine(
     /** 切换当前设备，同时通知通话状态切换数据源。 */
     fun selectDevice(address: String) {
         scope.launch {
+            val device = registry.device(address)
+            PhoneLog.engine.i {
+                "selectDevice($address): 当前设备 -> ${device?.displayName ?: "<未知>"}"
+            }
             registry.select(address)
-            registry.device(address)?.let { callStore.selectDevice(address, it.displayName) }
+            device?.let { callStore.selectDevice(address, it.displayName) }
         }
     }
 
     /** 调试入口：构造模拟来电（仅 Mock 网关生效）。 */
     fun simulateIncomingCall(number: String) {
         scope.launch {
+            PhoneLog.engine.i {
+                "simulateIncomingCall(${PhoneLog.mask(number)}): 仅 Mock 生效"
+            }
             (gateway as? DebugCallSimulator)?.simulateIncomingCall(number)
         }
     }
@@ -240,33 +254,49 @@ internal class PhoneEngine(
     suspend fun connect(address: String): PhoneResult<Unit> = withContext(dispatcher) {
         if (!started) return@withContext failure(PhoneError.NOT_READY, "中间件尚未启动")
         if (!gateway.isBluetoothEnabled()) {
+            PhoneLog.engine.w { "connect($address): 蓝牙未开启" }
             return@withContext failure(PhoneError.BLUETOOTH_OFF, "蓝牙未开启")
         }
         registry.device(address) ?: return@withContext failure(PhoneError.NO_DEVICE, "设备不存在")
+        PhoneLog.engine.d { "connect($address): 请求 HFP 连接" }
         manualDisconnects.remove(address)
         reconnectAttempts.remove(address)
         registry.markConnecting(address)
-        if (gateway.connect(address)) success()
-        else failure(PhoneError.NOT_READY, "连接命令发送失败")
+        if (gateway.connect(address)) {
+            PhoneLog.engine.i { "connect($address): 连接命令已下发" }
+            success()
+        } else {
+            PhoneLog.engine.w { "connect($address): 连接命令发送失败" }
+            failure(PhoneError.NOT_READY, "连接命令发送失败")
+        }
     }
 
     /** 断开手机；标记为主动断开以阻止自动重连。 */
     suspend fun disconnect(address: String): PhoneResult<Unit> = withContext(dispatcher) {
+        PhoneLog.engine.i { "disconnect($address): 主动断开，禁止自动重连" }
         manualDisconnects += address
         reconnectJobs.remove(address)?.cancel()
         if (gateway.disconnect(address)) success()
-        else failure(PhoneError.NOT_READY, "断开命令发送失败")
+        else {
+            PhoneLog.engine.w { "disconnect($address): 断开命令发送失败" }
+            failure(PhoneError.NOT_READY, "断开命令发送失败")
+        }
     }
 
     /** 发起配对，结果通过广播回调。 */
     suspend fun createBond(address: String): PhoneResult<Unit> = withContext(dispatcher) {
+        PhoneLog.engine.i { "createBond($address): 发起配对" }
         if (gateway.createBond(address)) success()
-        else failure(PhoneError.NOT_READY, "发起配对失败")
+        else {
+            PhoneLog.engine.w { "createBond($address): 发起配对失败" }
+            failure(PhoneError.NOT_READY, "发起配对失败")
+        }
     }
 
     /** 解除配对并清理该设备的本地记录。 */
     suspend fun removeBond(address: String): PhoneResult<Unit> = withContext(dispatcher) {
         if (gateway.removeBond(address)) {
+            PhoneLog.engine.i { "removeBond($address): 已解绑并清理本地状态" }
             manualDisconnects += address
             reconnectJobs.remove(address)?.cancel()
             if (prefs.lastDeviceAddress == address) prefs.lastDeviceAddress = null
@@ -277,6 +307,7 @@ internal class PhoneEngine(
             ringtone.update(callStore.state.value)
             success()
         } else {
+            PhoneLog.engine.w { "removeBond($address): 解除配对失败" }
             failure(PhoneError.NOT_READY, "解除配对失败")
         }
     }
@@ -289,15 +320,21 @@ internal class PhoneEngine(
         }
         val state = callStore.state.value
         if (state.waiting != null) {
+            PhoneLog.engine.w { "dial(${PhoneLog.mask(normalized)}): 有等待来电，拒绝拨号" }
             return@withContext failure(PhoneError.BUSY, "有等待来电，请先接听或拒接")
         }
         if (state.hasCall) {
+            PhoneLog.engine.w { "dial(${PhoneLog.mask(normalized)}): 已有通话，需走加拨" }
             return@withContext failure(PhoneError.BUSY, "已有通话，请使用加拨")
         }
         val device = connectedDevice()
             ?: return@withContext failure(PhoneError.NO_DEVICE, "没有已连接的手机")
+        PhoneLog.engine.i { "dial(${PhoneLog.mask(normalized)}): -> ${device.displayName}" }
         if (gateway.dial(device.address, normalized)) success()
-        else failure(PhoneError.NOT_READY, "拨号失败")
+        else {
+            PhoneLog.engine.w { "dial(${PhoneLog.mask(normalized)}): 下发失败" }
+            failure(PhoneError.NOT_READY, "拨号失败")
+        }
     }
 
     /** 已有一路接通（活动或保持）时加拨第二路，用于三方通话。 */
@@ -315,6 +352,7 @@ internal class PhoneEngine(
                 state.hasMultipleCalls -> PhoneError.BUSY to "已有两路通话，请先处理"
                 else -> PhoneError.NO_CALL to "当前没有可加拨的通话"
             }
+            PhoneLog.engine.d { "addCall: 当前不可加拨 -> $message" }
             return@withContext failure(error, message)
         }
         // 保持状态下 primaryCall 会取到 held，保证拨号发往正确的手机。
@@ -322,8 +360,14 @@ internal class PhoneEngine(
         if (device?.isConnected != true) {
             return@withContext failure(PhoneError.NO_DEVICE, "没有已连接的手机")
         }
+        PhoneLog.engine.i {
+            "addCall(${PhoneLog.mask(normalized)}): 加拨 -> ${device.displayName}"
+        }
         if (gateway.dial(device.address, normalized)) success()
-        else failure(PhoneError.NOT_READY, "加拨失败")
+        else {
+            PhoneLog.engine.w { "addCall(${PhoneLog.mask(normalized)}): 下发失败" }
+            failure(PhoneError.NOT_READY, "加拨失败")
+        }
     }
 
     /** 接听响铃中的一路：普通来电优先，其次是没有活动通话时的等待来电。 */
@@ -333,8 +377,15 @@ internal class PhoneEngine(
         val ringing = state.incoming
             ?: state.waiting?.takeIf { state.active == null }
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有来电")
+        PhoneLog.engine.i {
+            "answer(): 接听 ${PhoneLog.mask(ringing.number)}, " +
+                "callId=${ringing.id}, state=${ringing.state}"
+        }
         if (gateway.acceptCall(ringing.deviceId, AnswerPolicy.NORMAL)) success()
-        else failure(PhoneError.NOT_READY, "接听失败")
+        else {
+            PhoneLog.engine.w { "answer(): 接听失败" }
+            failure(PhoneError.NOT_READY, "接听失败")
+        }
     }
 
     /** 拒接来电；优先普通来电，其次第二路等待。 */
@@ -342,24 +393,42 @@ internal class PhoneEngine(
         val call = callStore.state.value.incoming
             ?: callStore.state.value.waiting
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有可拒接的电话")
+        PhoneLog.engine.i {
+            "reject(): 拒接 ${PhoneLog.mask(call.number)}, callId=${call.id}, state=${call.state}"
+        }
         if (gateway.rejectCall(call.deviceId)) success()
-        else failure(PhoneError.NOT_READY, "拒接失败")
+        else {
+            PhoneLog.engine.w { "reject(): 拒接失败" }
+            failure(PhoneError.NOT_READY, "拒接失败")
+        }
     }
 
     /** 挂断当前活动通话。 */
     suspend fun hangup(): PhoneResult<Unit> = withContext(dispatcher) {
         val active = callStore.state.value.active
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有活动通话")
+        PhoneLog.engine.i {
+            "hangup(): 挂断活动通话 ${PhoneLog.mask(active.number)}, callId=${active.id}"
+        }
         if (gateway.hangup(active.deviceId, active.id)) success()
-        else failure(PhoneError.NOT_READY, "挂断失败")
+        else {
+            PhoneLog.engine.w { "hangup(): 挂断失败, callId=${active.id}" }
+            failure(PhoneError.NOT_READY, "挂断失败")
+        }
     }
 
     /** 挂断保持中的通话，不影响当前活动通话。 */
     suspend fun hangupHeld(): PhoneResult<Unit> = withContext(dispatcher) {
         val held = callStore.state.value.held
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有保持中的通话")
+        PhoneLog.engine.i {
+            "hangupHeld(): 挂断保持通话 ${PhoneLog.mask(held.number)}, callId=${held.id}"
+        }
         if (gateway.hangup(held.deviceId, held.id)) success()
-        else failure(PhoneError.NOT_READY, "挂断失败")
+        else {
+            PhoneLog.engine.w { "hangupHeld(): 挂断失败, callId=${held.id}" }
+            failure(PhoneError.NOT_READY, "挂断失败")
+        }
     }
 
     /** 只挂断第二路等待来电，不影响当前活动通话。 */
@@ -367,8 +436,14 @@ internal class PhoneEngine(
         val waiting = callStore.state.value.waiting
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有等待中的来电")
         // AT+CHUP 在多路通话中只作用于等待/来电，不会挂断当前活动通话。
+        PhoneLog.engine.i {
+            "hangupWaiting(): 挂断等待来电 ${PhoneLog.mask(waiting.number)}, callId=${waiting.id}"
+        }
         if (gateway.rejectCall(waiting.deviceId)) success()
-        else failure(PhoneError.NOT_READY, "挂断等待来电失败")
+        else {
+            PhoneLog.engine.w { "hangupWaiting(): 挂断失败" }
+            failure(PhoneError.NOT_READY, "挂断等待来电失败")
+        }
     }
 
     /**
@@ -379,12 +454,24 @@ internal class PhoneEngine(
         val state = callStore.state.value
         // CHLD=2 在存在等待来电时会直接接听该路，避免误把“保持”按成接听。
         if (state.waiting != null) {
+            PhoneLog.engine.w { "hold(): 有等待来电，CHLD=2 会误接听，已阻止" }
             return@withContext failure(PhoneError.NOT_SUPPORTED, "有等待来电，请先接听或拒接")
         }
         val call = state.active ?: state.held
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有可保持/恢复的通话")
+        val action = when {
+            state.active != null && state.held != null -> "切换"
+            state.active != null -> "保持"
+            else -> "恢复"
+        }
+        PhoneLog.engine.i {
+            "hold(): $action ${PhoneLog.mask(call.number)}, callId=${call.id}"
+        }
         if (gateway.hold(call.deviceId)) success()
-        else failure(PhoneError.NOT_READY, "保持/切换失败")
+        else {
+            PhoneLog.engine.w { "hold(): $action 失败, callId=${call.id}" }
+            failure(PhoneError.NOT_READY, "保持/切换失败")
+        }
     }
 
     /** AT+CHLD=2：活动与保持互换；有等待来电时禁止保持。 */
@@ -398,8 +485,15 @@ internal class PhoneEngine(
         }
         val call = state.active ?: state.held
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有可切换的通话")
+        PhoneLog.engine.i {
+            "swap(): 切换 ${PhoneLog.mask(state.active?.number)} <-> " +
+                PhoneLog.mask(state.held?.number)
+        }
         if (gateway.hold(call.deviceId)) success()
-        else failure(PhoneError.NOT_READY, "切换失败")
+        else {
+            PhoneLog.engine.w { "swap(): 切换失败" }
+            failure(PhoneError.NOT_READY, "切换失败")
+        }
     }
 
     /** 合并活动+保持通话为会议（三方通话）。 */
@@ -418,10 +512,17 @@ internal class PhoneEngine(
             return@withContext failure(PhoneError.NOT_SUPPORTED, "当前已是会议通话，无需合并")
         }
         if (!gateway.supportsConference) {
+            PhoneLog.engine.w { "merge(): 系统未提供会议合并通道" }
             return@withContext failure(PhoneError.NOT_SUPPORTED, "当前系统未提供会议合并通道")
         }
+        PhoneLog.engine.i {
+            "merge(): 合并 ${PhoneLog.mask(state.active.number)} + ${PhoneLog.mask(state.held.number)}"
+        }
         if (gateway.conference(state.active.deviceId)) success()
-        else failure(PhoneError.NOT_SUPPORTED, "当前手机/协议栈不支持会议合并")
+        else {
+            PhoneLog.engine.w { "merge(): 手机/协议栈拒绝 CHLD=3" }
+            failure(PhoneError.NOT_SUPPORTED, "当前手机/协议栈不支持会议合并")
+        }
     }
 
     /**
@@ -439,8 +540,15 @@ internal class PhoneEngine(
             holdCurrent -> AnswerPolicy.HOLD_ACTIVE
             else -> AnswerPolicy.END_ACTIVE
         }
+        PhoneLog.engine.i {
+            "answerWaiting(holdCurrent=$holdCurrent): policy=$policy, " +
+                "等待来电=${PhoneLog.mask(waiting.number)}"
+        }
         if (gateway.acceptCall(waiting.deviceId, policy)) success()
-        else failure(PhoneError.NOT_READY, "接听等待来电失败")
+        else {
+            PhoneLog.engine.w { "answerWaiting(): 接听失败, policy=$policy" }
+            failure(PhoneError.NOT_READY, "接听等待来电失败")
+        }
     }
 
     /** 发送 DTMF；只允许 0-9、*、#。 */
@@ -450,8 +558,12 @@ internal class PhoneEngine(
         }
         val active = callStore.state.value.active
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有活动通话")
+        PhoneLog.engine.v { "sendDtmf(): '$code'" }
         if (gateway.sendDtmf(active.deviceId, code)) success()
-        else failure(PhoneError.NOT_READY, "DTMF 发送失败")
+        else {
+            PhoneLog.engine.w { "sendDtmf(): '$code' 发送失败" }
+            failure(PhoneError.NOT_READY, "DTMF 发送失败")
+        }
     }
 
     /** 连续发送多个 DTMF 字符，用于分机号、卡号等长串输入。 */
@@ -461,8 +573,10 @@ internal class PhoneEngine(
         }
         val active = callStore.state.value.active
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有活动通话")
+        PhoneLog.engine.d { "sendDtmf(): ${dtmf.length} 个字符" }
         dtmf.forEachIndexed { index, code ->
             if (!gateway.sendDtmf(active.deviceId, code)) {
+                PhoneLog.engine.w { "sendDtmf(): 第 ${index + 1} 个字符发送失败" }
                 return@withContext failure(PhoneError.NOT_READY, "DTMF 发送失败")
             }
             // 逐字符发送，给 AG 留出处理 AT+VTS 的间隔。
@@ -478,8 +592,10 @@ internal class PhoneEngine(
             return@withContext failure(PhoneError.NO_CALL, "当前没有可建立音频的通话")
         }
         if (state.audio == AudioState.CONNECTED || state.audio == AudioState.CONNECTING) {
+            PhoneLog.engine.d { "setAudioToCar(): 已是 ${state.audio}，跳过" }
             success()
         } else {
+            PhoneLog.engine.i { "setAudioToCar(): 请求建立 SCO/eSCO" }
             audioToCar()
         }
     }
@@ -490,7 +606,13 @@ internal class PhoneEngine(
         if (!state.hasVoiceSession) {
             return@withContext failure(PhoneError.NO_CALL, "当前没有可建立音频的通话")
         }
-        if (state.audio == AudioState.DISCONNECTED) success() else audioToPhone()
+        if (state.audio == AudioState.DISCONNECTED) {
+            PhoneLog.engine.d { "setAudioToPhone(): 已是断开状态，跳过" }
+            success()
+        } else {
+            PhoneLog.engine.i { "setAudioToPhone(): 断开 SCO，交回手机" }
+            audioToPhone()
+        }
     }
 
     /** 根据当前路由切换车机/手机音频，供单个“切换声道”按钮使用。 */
@@ -499,7 +621,11 @@ internal class PhoneEngine(
         if (!state.hasVoiceSession) {
             return@withContext failure(PhoneError.NO_CALL, "当前没有可建立音频的通话")
         }
-        if (state.audioRoute == AudioRoute.CAR) audioToPhone() else audioToCar()
+        val toCar = state.audioRoute != AudioRoute.CAR
+        PhoneLog.engine.i {
+            "toggleAudioRoute(): ${state.audioRoute} -> ${if (toCar) AudioRoute.CAR else AudioRoute.PHONE}"
+        }
+        if (toCar) audioToCar() else audioToPhone()
     }
 
     /** 设置车机麦克风静音；只静音本地采集，不改变手机侧麦克风。 */
@@ -508,7 +634,10 @@ internal class PhoneEngine(
             return@withContext failure(PhoneError.NO_CALL, "当前没有可静音的通话")
         }
         if (changeMicMute(muted)) success()
-        else failure(PhoneError.NOT_SUPPORTED, "系统不允许修改麦克风静音")
+        else {
+            PhoneLog.engine.w { "setMicMute($muted): 系统拒绝修改" }
+            failure(PhoneError.NOT_SUPPORTED, "系统不允许修改麦克风静音")
+        }
     }
 
     /** 在静音/取消静音之间切换。 */
@@ -516,40 +645,62 @@ internal class PhoneEngine(
         if (!callStore.state.value.hasVoiceSession) {
             return@withContext failure(PhoneError.NO_CALL, "当前没有可静音的通话")
         }
-        if (changeMicMute(!callStore.state.value.micMuted)) success()
-        else failure(PhoneError.NOT_SUPPORTED, "系统不允许修改麦克风静音")
+        val target = !callStore.state.value.micMuted
+        if (changeMicMute(target)) success()
+        else {
+            PhoneLog.engine.w { "toggleMicMute(): 系统拒绝修改" }
+            failure(PhoneError.NOT_SUPPORTED, "系统不允许修改麦克风静音")
+        }
     }
 
     /** 启动/停止手机侧语音识别。 */
     suspend fun voiceRecognition(start: Boolean): PhoneResult<Unit> = withContext(dispatcher) {
         val device = connectedDevice()
             ?: return@withContext failure(PhoneError.NO_DEVICE, "没有已连接的手机")
+        PhoneLog.engine.i { "voiceRecognition(start=$start)" }
         if (gateway.voiceRecognition(device.address, start)) success()
-        else failure(PhoneError.NOT_SUPPORTED, "手机不支持语音识别")
+        else {
+            PhoneLog.engine.w { "voiceRecognition(start=$start): 手机不支持" }
+            failure(PhoneError.NOT_SUPPORTED, "手机不支持语音识别")
+        }
     }
 
     /** 读取联系人；无权限时返回 PERMISSION_DENIED。 */
     suspend fun loadContacts(limit: Int = 500): PhoneResult<List<Contact>> {
         if (!contacts.canReadContacts()) {
+            PhoneLog.engine.w { "loadContacts(): 缺少 READ_CONTACTS 权限" }
             return PhoneResult.Failure(PhoneError.PERMISSION_DENIED, "缺少 READ_CONTACTS 权限")
         }
-        return PhoneResult.Success(contacts.contacts(limit))
+        val list = contacts.contacts(limit)
+        PhoneLog.engine.d { "loadContacts(): 返回 ${list.size} 条" }
+        return PhoneResult.Success(list)
     }
 
     /** 读取通话记录；无权限时返回 PERMISSION_DENIED。 */
     suspend fun loadCallLog(limit: Int = 200): PhoneResult<List<CallLogEntry>> {
         if (!contacts.canReadCallLog()) {
+            PhoneLog.engine.w { "loadCallLog(): 缺少 READ_CALL_LOG 权限" }
             return PhoneResult.Failure(PhoneError.PERMISSION_DENIED, "缺少 READ_CALL_LOG 权限")
         }
-        return PhoneResult.Success(contacts.callLog(limit))
+        val list = contacts.callLog(limit)
+        PhoneLog.engine.d { "loadCallLog(): 返回 ${list.size} 条" }
+        return PhoneResult.Success(list)
     }
 
     /** 网关事件总入口：更新设备/通话/音频，并驱动铃声与重连。 */
     private fun onGatewayEvent(event: HfpEvent) {
+        // 每条网关事件留痕，排查“状态为何未变”时可按事件顺序比对。
+        // AG 电量/信号可能频繁上报，降为 VERBOSE，避免 DEBUG 刷屏。
+        if (event is HfpEvent.AgChanged) {
+            PhoneLog.engine.v { "网关事件 ${event.summary()}" }
+        } else {
+            PhoneLog.engine.d { "网关事件 ${event.summary()}" }
+        }
         when (event) {
             is HfpEvent.AdapterChanged -> {
                 adapterEnabled = event.enabled
                 if (event.enabled) {
+                    PhoneLog.engine.i { "蓝牙开启: 重建监听并刷新设备" }
                     // 蓝牙刚打开或代理丢失时，网关会自行补拿代理。
                     if (!gateway.isReady) gateway.start()
                     pbap.start()
@@ -557,6 +708,7 @@ internal class PhoneEngine(
                     loadContactNames()
                     maybeAutoConnect()
                 } else {
+                    PhoneLog.engine.i { "蓝牙关闭: 清理设备、通话与铃声" }
                     pbap.stop()
                     registry.clearConnections()
                     changeMicMute(false)
@@ -589,6 +741,9 @@ internal class PhoneEngine(
             }
 
             is HfpEvent.AudioChanged -> {
+                PhoneLog.engine.d {
+                    "音频状态: ${event.address}, ${event.state}, wideband=${event.wideband}"
+                }
                 registry.updateAudio(event.address, event.state)
                 callStore.updateAudio(event.address, event.state, event.wideband)
             }
@@ -615,7 +770,10 @@ internal class PhoneEngine(
 
             is HfpEvent.ServiceLost -> scheduleGatewayRestart()
 
-            is HfpEvent.Error -> _events.tryEmit(PhoneEvent.Error(event.message))
+            is HfpEvent.Error -> {
+                PhoneLog.engine.w { "网关错误: ${event.message}" }
+                _events.tryEmit(PhoneEvent.Error(event.message))
+            }
         }
     }
 
@@ -627,6 +785,9 @@ internal class PhoneEngine(
     /** 非 HFP 终止场景（蓝牙关闭/断开/停止）主动补发结束事件。 */
     private fun emitAllCallsEnded() {
         val calls = callStore.state.value.calls
+        if (calls.isNotEmpty()) {
+            PhoneLog.engine.i { "补发通话结束: ${calls.size} 路" }
+        }
         calls.forEach { _events.tryEmit(PhoneEvent.CallEnded(it)) }
         if (calls.isNotEmpty()) _events.tryEmit(PhoneEvent.SessionEnded(calls.last()))
     }
@@ -637,7 +798,17 @@ internal class PhoneEngine(
         lastPublishedState = current
 
         if (previous.uiState != current.uiState) {
+            PhoneLog.engine.i { "UI 阶段: ${previous.uiState} -> ${current.uiState}" }
             _events.tryEmit(PhoneEvent.CallUiChanged(previous.uiState, current.uiState))
+        }
+
+        // 调试归并结果：只输出关键字段，号码脱敏。
+        PhoneLog.engine.d {
+            "通话快照: ui=${current.uiState}, active=${PhoneLog.mask(current.active?.number)}, " +
+                "held=${PhoneLog.mask(current.held?.number)}, " +
+                "waiting=${PhoneLog.mask(current.waiting?.number)}, " +
+                "会议=${current.isConference}, audio=${current.audio}/${current.audioRoute}, " +
+                "mic=${current.micMuted}"
         }
 
         // 只有同一台手机才能确定是“通话结束”，避免切换设备时误报。
@@ -661,6 +832,9 @@ internal class PhoneEngine(
 
     /** 设备连接成功：记住设备、同步电话本、刷新状态。 */
     private fun onDeviceConnected(address: String) {
+        PhoneLog.engine.i {
+            "设备连接: $address (${registry.device(address)?.displayName ?: "<未知>"})"
+        }
         manualDisconnects.remove(address)
         reconnectAttempts[address] = 0
         reconnectJobs.remove(address)?.cancel()
@@ -692,6 +866,7 @@ internal class PhoneEngine(
         }
         lastContactLoadElapsed = now
         contactsLoading = true
+        PhoneLog.engine.d { "开始加载联系人用于回填" }
         scope.launch {
             try {
                 val matches = contacts.contacts(CONTACT_LOOKUP_LIMIT)
@@ -704,6 +879,7 @@ internal class PhoneEngine(
                     }
                     .toMap()
                 callStore.updateContacts(matches)
+                PhoneLog.engine.d { "联系人回填: ${matches.size} 个号码匹配" }
             } finally {
                 contactsLoading = false
             }
@@ -712,6 +888,9 @@ internal class PhoneEngine(
 
     /** 设备断开：清理通话与铃声，并按配置安排重连。 */
     private fun onDeviceDisconnected(address: String) {
+        PhoneLog.engine.i {
+            "设备断开: $address (${registry.device(address)?.displayName ?: "<未知>"})"
+        }
         pbap.disconnect(address)
         if (callStore.state.value.deviceId == address) emitAllCallsEnded()
         callStore.clearDevice(address)
@@ -733,13 +912,27 @@ internal class PhoneEngine(
     private fun scheduleReconnect(address: String) {
         if (!config.autoReconnect || address in manualDisconnects) return
         val attempt = reconnectAttempts.getOrDefault(address, 0)
-        if (attempt >= MAX_RECONNECT_ATTEMPTS) return
+        if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+            PhoneLog.engine.w {
+                "reconnect($address): 已达最大次数 $MAX_RECONNECT_ATTEMPTS，停止重连"
+            }
+            return
+        }
+        val delayMs = config.reconnectDelayMs * (attempt + 1)
+        PhoneLog.engine.i { "reconnect($address): 第 ${attempt + 1} 次，${delayMs}ms 后重试" }
         reconnectAttempts[address] = attempt + 1
         reconnectJobs.remove(address)?.cancel()
         reconnectJobs[address] = scope.launch {
-            delay((config.reconnectDelayMs * (attempt + 1)).milliseconds)
-            if (!started || !gateway.isBluetoothEnabled()) return@launch
-            if (registry.device(address)?.isConnected == true) return@launch
+            delay(delayMs.milliseconds)
+            if (!started || !gateway.isBluetoothEnabled()) {
+                PhoneLog.engine.d { "reconnect($address): 条件不满足，放弃本次" }
+                return@launch
+            }
+            if (registry.device(address)?.isConnected == true) {
+                PhoneLog.engine.d { "reconnect($address): 已连接，无需重试" }
+                return@launch
+            }
+            PhoneLog.engine.d { "reconnect($address): 下发连接命令" }
             gateway.connect(address)
         }
     }
@@ -747,11 +940,13 @@ internal class PhoneEngine(
     /** 系统蓝牙服务重启后，延时重建网关代理。 */
     private fun scheduleGatewayRestart() {
         if (!started) return
+        PhoneLog.engine.w { "蓝牙服务断开，${GATEWAY_RESTART_DELAY_MS}ms 后重建代理" }
         _events.tryEmit(PhoneEvent.Info("蓝牙电话服务断开，正在重连"))
         serviceRestartJob?.cancel()
         serviceRestartJob = scope.launch {
             delay(GATEWAY_RESTART_DELAY_MS.milliseconds)
             if (!started || !gateway.isBluetoothEnabled()) return@launch
+            PhoneLog.engine.i { "重建 HFP 网关代理" }
             gateway.stop()
             gateway.start()
             refreshDevices()
@@ -764,7 +959,11 @@ internal class PhoneEngine(
         callStore.setConferenceMergeSupported(gateway.supportsConference)
         registry.replaceBonded(gateway.bondedDevices())
         registry.selectConnectedIfNeeded()
-        registry.devices.value.filter { it.isConnected }.forEach {
+        val deviceList = registry.devices.value
+        PhoneLog.engine.d {
+            "刷新设备: 共 ${deviceList.size} 台，已连接 ${deviceList.count { it.isConnected }} 台"
+        }
+        deviceList.filter { it.isConnected }.forEach {
             gateway.setAudioRouteAllowed(it.address, true)
             pbap.connect(it.address)
         }
@@ -777,6 +976,7 @@ internal class PhoneEngine(
         val address = prefs.lastDeviceAddress ?: return
         val device = registry.device(address) ?: return
         if (device.isConnected || device.hfpState == ProfileState.CONNECTING) return
+        PhoneLog.engine.i { "autoConnect($address): 自动连接上次使用的设备" }
         scope.launch {
             delay(config.reconnectDelayMs.milliseconds)
             if (!started || !gateway.isBluetoothEnabled()) return@launch
@@ -788,12 +988,16 @@ internal class PhoneEngine(
     /** 根据蓝牙开关和设备状态计算整体连接状态。 */
     private fun updateConnectionState() {
         val devices = registry.devices.value
-        _connectionState.value = when {
+        val next = when {
             !adapterEnabled -> PhoneConnectionState.BLUETOOTH_OFF
             devices.any { it.isConnected } -> PhoneConnectionState.CONNECTED
             devices.any { it.hfpState == ProfileState.CONNECTING } -> PhoneConnectionState.CONNECTING
             else -> PhoneConnectionState.NO_DEVICE
         }
+        if (_connectionState.value != next) {
+            PhoneLog.engine.i { "连接状态: ${_connectionState.value} -> $next" }
+        }
+        _connectionState.value = next
     }
 
     /** 取当前可用设备：优先当前设备，否则任意已连接设备。 */
@@ -816,7 +1020,10 @@ internal class PhoneEngine(
             ?: return failure(PhoneError.NO_DEVICE, "没有已连接的手机")
         gateway.setAudioRouteAllowed(device.address, true)
         return if (gateway.connectAudio(device.address)) success()
-        else failure(PhoneError.NOT_READY, "音频切到车机失败")
+        else {
+            PhoneLog.engine.w { "audioToCar(): SCO 建立失败, device=${device.address}" }
+            failure(PhoneError.NOT_READY, "音频切到车机失败")
+        }
     }
 
     /** 实际切换到手机音频。 */
@@ -824,18 +1031,28 @@ internal class PhoneEngine(
         val device = activeAudioDevice()
             ?: return failure(PhoneError.NO_DEVICE, "没有已连接的手机")
         return if (gateway.disconnectAudio(device.address)) success()
-        else failure(PhoneError.NOT_READY, "音频切到手机失败")
+        else {
+            PhoneLog.engine.w { "audioToPhone(): SCO 断开失败, device=${device.address}" }
+            failure(PhoneError.NOT_READY, "音频切到手机失败")
+        }
     }
 
     /** 修改 AudioManager 静音并同步到状态；系统拒绝时返回 false。 */
     private fun changeMicMute(muted: Boolean): Boolean {
         if (callStore.state.value.micMuted == muted) return true
-        val audio = audioManager ?: return false
+        val audio = audioManager ?: run {
+            PhoneLog.engine.w { "changeMicMute($muted): AudioManager 不可用" }
+            return false
+        }
         val applied = runCatching {
             audio.setMicrophoneMute(muted)
             audio.isMicrophoneMute == muted
         }.getOrDefault(false)
-        if (!applied) return false
+        if (!applied) {
+            PhoneLog.engine.w { "changeMicMute($muted): 系统拒绝修改" }
+            return false
+        }
+        PhoneLog.audio.i { "车机麦克风静音: $muted" }
         callStore.setMicMuted(muted)
         return true
     }
