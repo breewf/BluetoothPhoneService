@@ -1,10 +1,10 @@
-package com.example.bluetoothphone.core
+package com.bluetooth.phone.core
 
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
-import com.example.bluetoothphone.api.PhoneCallState
+import com.bluetooth.phone.api.PhoneCallState
 
 /**
  * 只负责本地铃声。

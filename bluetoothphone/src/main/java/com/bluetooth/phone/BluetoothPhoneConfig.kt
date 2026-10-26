@@ -1,6 +1,6 @@
-package com.example.bluetoothphone
+package com.bluetooth.phone
 
-import com.example.bluetoothphone.api.CallClassifier
+import com.bluetooth.phone.api.CallClassifier
 
 /**
  * 中间件运行参数。
@@ -28,7 +28,7 @@ data class BluetoothPhoneConfig @JvmOverloads constructor(
     val logTag: String = "BluetoothPhone",
     /**
      * 号码来源分类器，用于识别微信/VoIP 等网络电话。
-     * HFP 不携带应用信息，默认返回 [com.example.bluetoothphone.api.CallKind.UNKNOWN]。
+     * HFP 不携带应用信息，默认返回 [com.bluetooth.phone.api.CallKind.UNKNOWN]。
      */
     val callClassifier: CallClassifier? = null
 )

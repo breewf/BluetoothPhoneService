@@ -1,17 +1,17 @@
-package com.example.bluetoothphone
+package com.bluetooth.phone
 
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import com.example.bluetoothphone.api.AudioRoute
-import com.example.bluetoothphone.api.CallLogEntry
-import com.example.bluetoothphone.api.Contact
-import com.example.bluetoothphone.api.PhoneCallState
-import com.example.bluetoothphone.api.PhoneConnectionState
-import com.example.bluetoothphone.api.PhoneDevice
-import com.example.bluetoothphone.api.PhoneEvent
-import com.example.bluetoothphone.api.PhoneResult
-import com.example.bluetoothphone.core.PhoneEngine
+import com.bluetooth.phone.api.AudioRoute
+import com.bluetooth.phone.api.CallLogEntry
+import com.bluetooth.phone.api.Contact
+import com.bluetooth.phone.api.PhoneCallState
+import com.bluetooth.phone.api.PhoneConnectionState
+import com.bluetooth.phone.api.PhoneDevice
+import com.bluetooth.phone.api.PhoneEvent
+import com.bluetooth.phone.api.PhoneResult
+import com.bluetooth.phone.core.PhoneEngine
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 

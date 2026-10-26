@@ -1,4 +1,4 @@
-package com.example.bluetoothphone.hfp
+package com.bluetooth.phone.hfp
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -14,11 +14,11 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
-import com.example.bluetoothphone.BluetoothPhoneConfig
-import com.example.bluetoothphone.api.AudioState
-import com.example.bluetoothphone.api.BondState
-import com.example.bluetoothphone.api.CallState
-import com.example.bluetoothphone.api.ProfileState
+import com.bluetooth.phone.BluetoothPhoneConfig
+import com.bluetooth.phone.api.AudioState
+import com.bluetooth.phone.api.BondState
+import com.bluetooth.phone.api.CallState
+import com.bluetooth.phone.api.ProfileState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow

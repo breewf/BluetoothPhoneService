@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.bluetoothphone"
+    namespace = "com.bluetooth.phone"
     compileSdk {
         version = release(34)
     }

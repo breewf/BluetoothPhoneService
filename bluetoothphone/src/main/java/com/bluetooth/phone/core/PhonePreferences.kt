@@ -1,4 +1,4 @@
-package com.example.bluetoothphone.core
+package com.bluetooth.phone.core
 
 import android.content.Context
 

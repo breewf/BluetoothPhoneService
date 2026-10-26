@@ -1,4 +1,4 @@
-package com.example.bluetoothphone.api
+package com.bluetooth.phone.api
 
 import java.util.Locale
 

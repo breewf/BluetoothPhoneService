@@ -1,4 +1,4 @@
-package com.example.bluetoothphone.hfp
+package com.bluetooth.phone.hfp
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter

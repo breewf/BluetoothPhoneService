@@ -1,8 +1,8 @@
 package com.example.bluetoothphoneservice
 
 import android.app.Application
-import com.example.bluetoothphone.BluetoothPhone
-import com.example.bluetoothphone.BluetoothPhoneConfig
+import com.bluetooth.phone.BluetoothPhone
+import com.bluetooth.phone.BluetoothPhoneConfig
 
 /** 应用入口：根据系统能力决定使用真实 HFP 还是 Mock。 */
 class BluetoothPhoneApp : Application() {

@@ -1,9 +1,9 @@
-package com.example.bluetoothphone.hfp
+package com.bluetooth.phone.hfp
 
-import com.example.bluetoothphone.api.AudioState
-import com.example.bluetoothphone.api.BondState
-import com.example.bluetoothphone.api.CallState
-import com.example.bluetoothphone.api.ProfileState
+import com.bluetooth.phone.api.AudioState
+import com.bluetooth.phone.api.BondState
+import com.bluetooth.phone.api.CallState
+import com.bluetooth.phone.api.ProfileState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

@@ -1,4 +1,4 @@
-package com.example.bluetoothphone.api
+package com.bluetooth.phone.api
 
 /** 统一错误码，界面可直接映射提示文案。 */
 enum class PhoneError {

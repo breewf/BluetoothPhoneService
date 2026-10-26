@@ -1,16 +1,16 @@
-package com.example.bluetoothphone.core
+package com.bluetooth.phone.core
 
 import android.os.SystemClock
-import com.example.bluetoothphone.api.AudioRoute
-import com.example.bluetoothphone.api.AudioState
-import com.example.bluetoothphone.api.CallClassifier
-import com.example.bluetoothphone.api.CallDirection
-import com.example.bluetoothphone.api.CallInfo
-import com.example.bluetoothphone.api.CallKind
-import com.example.bluetoothphone.api.CallState
-import com.example.bluetoothphone.api.CallUiState
-import com.example.bluetoothphone.api.PhoneCallState
-import com.example.bluetoothphone.hfp.HfpCall
+import com.bluetooth.phone.api.AudioRoute
+import com.bluetooth.phone.api.AudioState
+import com.bluetooth.phone.api.CallClassifier
+import com.bluetooth.phone.api.CallDirection
+import com.bluetooth.phone.api.CallInfo
+import com.bluetooth.phone.api.CallKind
+import com.bluetooth.phone.api.CallState
+import com.bluetooth.phone.api.CallUiState
+import com.bluetooth.phone.api.PhoneCallState
+import com.bluetooth.phone.hfp.HfpCall
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

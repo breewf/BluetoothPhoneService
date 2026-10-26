@@ -1,10 +1,10 @@
-package com.example.bluetoothphone.core
+package com.bluetooth.phone.core
 
-import com.example.bluetoothphone.api.AudioState
-import com.example.bluetoothphone.api.PhoneDevice
-import com.example.bluetoothphone.api.ProfileState
-import com.example.bluetoothphone.hfp.GatewayDevice
-import com.example.bluetoothphone.hfp.HfpAgState
+import com.bluetooth.phone.api.AudioState
+import com.bluetooth.phone.api.PhoneDevice
+import com.bluetooth.phone.api.ProfileState
+import com.bluetooth.phone.hfp.GatewayDevice
+import com.bluetooth.phone.hfp.HfpAgState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

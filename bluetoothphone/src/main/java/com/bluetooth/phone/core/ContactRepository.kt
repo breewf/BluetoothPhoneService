@@ -1,4 +1,4 @@
-package com.example.bluetoothphone.core
+package com.bluetooth.phone.core
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -7,8 +7,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.provider.CallLog
 import android.provider.ContactsContract
-import com.example.bluetoothphone.api.CallLogEntry
-import com.example.bluetoothphone.api.Contact
+import com.bluetooth.phone.api.CallLogEntry
+import com.bluetooth.phone.api.Contact
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 

@@ -1,12 +1,12 @@
 package com.example.bluetoothphoneservice.ui
 
-import com.example.bluetoothphone.api.AudioState
-import com.example.bluetoothphone.api.CallKind
-import com.example.bluetoothphone.api.CallState
-import com.example.bluetoothphone.api.CallUiState
-import com.example.bluetoothphone.api.PhoneConnectionState
-import com.example.bluetoothphone.api.PhoneError
-import com.example.bluetoothphone.api.ProfileState
+import com.bluetooth.phone.api.AudioState
+import com.bluetooth.phone.api.CallKind
+import com.bluetooth.phone.api.CallState
+import com.bluetooth.phone.api.CallUiState
+import com.bluetooth.phone.api.PhoneConnectionState
+import com.bluetooth.phone.api.PhoneError
+import com.bluetooth.phone.api.ProfileState
 
 /** 整体连接状态文案。 */
 fun PhoneConnectionState.label(): String = when (this) {
