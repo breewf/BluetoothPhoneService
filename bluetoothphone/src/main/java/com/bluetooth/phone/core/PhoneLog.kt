@@ -60,7 +60,10 @@ internal object PhoneLog {
 }
 
 /** 某个模块的日志句柄，输出格式为 `模块 | 内容`。 */
-internal class LogScope(private val module: String) {
+internal class LogScope(
+    /** 模块前缀，例如 Engine/Hfp。 */
+    private val module: String
+) {
 
     /** 最详细日志：逐条映射、原始字段。 */
     fun v(message: () -> String) = log(PhoneLogLevel.VERBOSE, null, message)

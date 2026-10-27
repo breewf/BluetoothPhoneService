@@ -56,8 +56,11 @@ internal class SystemPbapGateway(private val context: Context) : PbapGateway {
         const val PROFILE_PBAP_CLIENT = 17
     }
 
+    /** 本机蓝牙适配器。 */
     private val adapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
+
+    /** PBAP Client 类；null 表示当前系统不支持。 */
     private val clientClass: Class<*>? = runCatching {
         Class.forName("android.bluetooth.BluetoothPbapClient")
     }.getOrNull()

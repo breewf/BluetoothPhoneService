@@ -13,12 +13,20 @@ import com.bluetooth.phone.api.PhoneCallState
  */
 internal class RingtonePlayer(context: Context) {
 
+    /** 应用上下文，避免持有 Activity。 */
     private val appContext = context.applicationContext
+
+    /** 当前播放的铃声实例。 */
     private var ringtone: Ringtone? = null
+
+    /** 是否正在响铃。 */
     private var ringing = false
+
+    /** 当前铃声是否循环播放。 */
     private var looping = false
 
-    /** 根据最新通话状态开始/停止本地铃声。 */
+    /** 根据最新通话状态开始/停止本地铃声；允许从引擎线程外调用。 */
+    @Synchronized
     fun update(state: PhoneCallState) {
         val call = state.incoming ?: state.waiting
         val shouldRing = call != null && !call.isInBandRing
@@ -38,6 +46,7 @@ internal class RingtonePlayer(context: Context) {
     }
 
     /** 停止并释放当前铃声。 */
+    @Synchronized
     fun stop() {
         ringing = false
         looping = false
@@ -46,6 +55,7 @@ internal class RingtonePlayer(context: Context) {
     }
 
     /** 开始播放系统默认铃声，[loop] 控制是否循环。 */
+    @Synchronized
     private fun start(loop: Boolean) {
         stop()
         val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE) ?: run {

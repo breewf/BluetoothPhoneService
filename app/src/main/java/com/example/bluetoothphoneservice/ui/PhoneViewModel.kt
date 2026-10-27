@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -25,14 +26,23 @@ import kotlinx.coroutines.launch
  * 所有字段都来自中间件的 StateFlow 或本页操作结果，XML 层只负责渲染。
  */
 data class PhoneUiState(
+    /** 已配对设备列表。 */
     val devices: List<PhoneDevice> = emptyList(),
+    /** 当前操作的手机。 */
     val activeDevice: PhoneDevice? = null,
+    /** 统一通话快照。 */
     val call: PhoneCallState = PhoneCallState(),
+    /** 中间件整体连接状态。 */
     val connection: PhoneConnectionState = PhoneConnectionState.NO_DEVICE,
+    /** 拨号盘输入。 */
     val number: String = "",
+    /** 操作结果或错误提示。 */
     val status: String? = null,
+    /** 已读取的联系人。 */
     val contacts: List<Contact> = emptyList(),
+    /** 已读取的通话记录。 */
     val callLog: List<CallLogEntry> = emptyList(),
+    /** 是否运行在模拟 HFP。 */
     val isMock: Boolean = false
 )
 
@@ -44,11 +54,28 @@ data class PhoneUiState(
  */
 class PhoneViewModel(application: Application) : AndroidViewModel(application) {
 
+    /** 中间件四个状态域的合并快照，避免同一批变化多次写 uiState。 */
+    private data class MiddlewareSnapshot(
+        /** 已配对设备。 */
+        val devices: List<PhoneDevice>,
+        /** 当前设备。 */
+        val activeDevice: PhoneDevice?,
+        /** 通话快照。 */
+        val call: PhoneCallState,
+        /** 整体连接状态。 */
+        val connection: PhoneConnectionState
+    )
+
+    /** 中间件单例。 */
     private val phone = BluetoothPhone.get(application)
 
+    /** 页面可变状态。 */
     private val _uiState = MutableStateFlow(PhoneUiState(isMock = phone.isMock))
+
+    /** 对外只读的页面状态。 */
     val uiState: StateFlow<PhoneUiState> = _uiState.asStateFlow()
 
+    /** 初始化订阅并主动刷新一次中间件状态。 */
     init {
         observePhone()
         phone.refresh()
@@ -56,26 +83,27 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 订阅设备、通话、连接状态与一次性事件。 */
     private fun observePhone() {
+        // 四个状态域合流后只写一次 uiState，避免同一批变化触发多次页面刷新。
         viewModelScope.launch {
-            phone.devices.collect { devices ->
-                _uiState.update { it.copy(devices = devices) }
+            combine(
+                phone.devices,
+                phone.activeDevice,
+                phone.callState,
+                phone.connectionState
+            ) { devices, activeDevice, call, connection ->
+                MiddlewareSnapshot(devices, activeDevice, call, connection)
+            }.collect { snapshot ->
+                _uiState.update {
+                    it.copy(
+                        devices = snapshot.devices,
+                        activeDevice = snapshot.activeDevice,
+                        call = snapshot.call,
+                        connection = snapshot.connection
+                    )
+                }
             }
         }
-        viewModelScope.launch {
-            phone.activeDevice.collect { device ->
-                _uiState.update { it.copy(activeDevice = device) }
-            }
-        }
-        viewModelScope.launch {
-            phone.callState.collect { call ->
-                _uiState.update { it.copy(call = call) }
-            }
-        }
-        viewModelScope.launch {
-            phone.connectionState.collect { connection ->
-                _uiState.update { it.copy(connection = connection) }
-            }
-        }
+        // 一次性事件只影响提示文案，与持续状态分开收集。
         viewModelScope.launch {
             phone.events.collect { event ->
                 when (event) {
@@ -144,7 +172,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
                 runAction("正在加拨第二路") { phone.addCall(state.number) }
 
             state.call.waiting != null -> setStatus("有等待来电，请先接听或拒接")
-            state.call.outgoing != null -> setStatus("已有去电中的通话，请等待接通")
+            state.call.outgoing != null -> setStatus("已有去电中的通话，可取消或等待接通")
             state.call.isConference -> setStatus("会议通话中不支持加拨")
             state.call.hasCall -> setStatus("当前已有两路通话，请先处理一路")
             else -> runAction("正在拨号") { phone.dial(state.number) }
@@ -159,6 +187,14 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 挂断当前活动通话。 */
     fun hangup() = runAction("已挂断") { phone.hangup() }
+
+    /** 取消去电中的一路（对方尚未接听）。 */
+    fun cancelOutgoing() = runAction("已取消拨号") { phone.cancelOutgoing() }
+
+    /** 挂断活动通话；没有活动通话时取消去电。 */
+    fun hangupOrCancel() {
+        if (_uiState.value.call.active != null) hangup() else cancelOutgoing()
+    }
 
     /** 挂断保持中的通话。 */
     fun hangupHeld() = runAction("已挂断保持通话") { phone.hangupHeld() }

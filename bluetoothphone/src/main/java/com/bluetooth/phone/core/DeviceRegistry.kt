@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 internal class DeviceRegistry {
 
+    /** 内部可变设备列表。 */
     private val _devices = MutableStateFlow<List<PhoneDevice>>(emptyList())
 
     /** 对外发布的设备列表（已排序）。 */
@@ -38,7 +39,6 @@ internal class DeviceRegistry {
             map[device.address] = PhoneDevice(
                 address = device.address,
                 name = device.name,
-                alias = previous?.alias ?: device.name,
                 bondState = device.bondState,
                 hfpState = device.hfpState,
                 isActive = previous?.isActive == true,
@@ -46,7 +46,12 @@ internal class DeviceRegistry {
                 signal = previous?.signal,
                 roaming = previous?.roaming,
                 operatorName = previous?.operatorName,
-                audioState = previous?.audioState ?: AudioState.DISCONNECTED
+                // 只有已连接设备才可能保留 SCO 状态。
+                audioState = if (device.hfpState == ProfileState.CONNECTED) {
+                    previous?.audioState ?: AudioState.DISCONNECTED
+                } else {
+                    AudioState.DISCONNECTED
+                }
             )
         }
         ensureActive()
@@ -60,7 +65,15 @@ internal class DeviceRegistry {
         if (current.hfpState != state) {
             PhoneLog.device.d { "HFP 状态: $address ${current.hfpState} -> $state" }
         }
-        map[address] = current.copy(hfpState = state)
+        map[address] = current.copy(
+            hfpState = state,
+            // HFP 断开时 SCO 必然不可用，同步清掉音频状态。
+            audioState = if (state == ProfileState.DISCONNECTED) {
+                AudioState.DISCONNECTED
+            } else {
+                current.audioState
+            }
+        )
         // 已有可用当前设备时不抢焦点，避免第二台手机连接打断正在进行的通话。
         if (state == ProfileState.CONNECTED) {
             val active = map[_activeAddress.value]
@@ -97,12 +110,11 @@ internal class DeviceRegistry {
         publish()
     }
 
-    /** 更新通话音频状态。 */
+    /** 更新通话音频状态；未连接设备忽略迟到的音频广播。 */
     fun updateAudio(address: String, state: AudioState) {
         val current = map[address] ?: return
-        if (current.audioState != state) {
-            PhoneLog.device.d { "音频状态: $address ${current.audioState} -> $state" }
-        }
+        if (!current.isConnected || current.audioState == state) return
+        PhoneLog.device.d { "音频状态: $address ${current.audioState} -> $state" }
         map[address] = current.copy(audioState = state)
         publish()
     }

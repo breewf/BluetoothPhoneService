@@ -21,6 +21,7 @@ import kotlinx.coroutines.withContext
 @SuppressLint("MissingPermission")
 internal class ContactRepository(private val context: Context) {
 
+    /** 系统 ContentResolver，用于查询联系人/通话记录。 */
     private val resolver: ContentResolver = context.contentResolver
 
     /** 是否已授予读取联系人权限。 */

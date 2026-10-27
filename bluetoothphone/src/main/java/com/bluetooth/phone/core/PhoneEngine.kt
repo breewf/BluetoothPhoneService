@@ -31,6 +31,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -87,9 +88,13 @@ internal class PhoneEngine(
     private val contacts = ContactRepository(appContext)
     private val ringtone = RingtonePlayer(appContext)
 
+    /** 内部可变连接状态。 */
     private val _connectionState = MutableStateFlow(PhoneConnectionState.NO_DEVICE)
+
+    /** 一次性提示事件；缓冲区满时丢弃最旧事件，保证 tryEmit 不会静默失败。 */
     private val _events = MutableSharedFlow<PhoneEvent>(
-        extraBufferCapacity = 16
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
     /** 是否已启动；[shutdown] 可能来自主线程，需要保证可见性。 */
@@ -108,6 +113,7 @@ internal class PhoneEngine(
 
     /** 正在等待的重连任务，可取消。 */
     private val reconnectJobs = mutableMapOf<String, Job>()
+    /** 蓝牙服务重启后的代理重建任务。 */
     private var serviceRestartJob: Job? = null
 
     /** 避免并发重复加载联系人。 */
@@ -142,10 +148,20 @@ internal class PhoneEngine(
         }.stateIn(scope, SharingStarted.Eagerly, null)
 
     init {
-        // 所有网关事件在引擎线程串行处理。
-        scope.launch { gateway.events.collect(::onGatewayEvent) }
+        // 所有网关事件在引擎线程串行处理；单条事件异常不能终止整条事件流。
+        scope.launch {
+            gateway.events.collect { event ->
+                runCatching { onGatewayEvent(event) }
+                    .onFailure { PhoneLog.engine.e(it) { "处理网关事件失败: ${event.summary()}" } }
+            }
+        }
         // 对外状态变化后生成一次性事件，保证 HMI 能可靠处理“结束页”等场景。
-        scope.launch { callStore.state.collect(::onCallStatePublished) }
+        scope.launch {
+            callStore.state.collect { state ->
+                runCatching { onCallStatePublished(state) }
+                    .onFailure { PhoneLog.engine.e(it) { "处理通话状态失败" } }
+            }
+        }
     }
 
     /** 启动链路；重复调用只做补偿，不会重建网关。 */
@@ -158,6 +174,8 @@ internal class PhoneEngine(
                 pbap.start()
                 refreshDevices()
                 loadContactNames()
+                // 权限可能在运行中才授予，补偿启动时补一次自动连接。
+                maybeAutoConnect()
                 return@launch
             }
             started = true
@@ -185,6 +203,7 @@ internal class PhoneEngine(
             serviceRestartJob?.cancel()
             reconnectJobs.values.forEach { it.cancel() }
             reconnectJobs.clear()
+            reconnectAttempts.clear()
             registry.clearConnections()
             changeMicMute(false)
             emitAllCallsEnded()
@@ -194,8 +213,8 @@ internal class PhoneEngine(
     }
 
     /**
-     * 彻底释放：取消协程并关闭线程，实例不可再用。
-     * 先停网关和线程，再清理共享状态，避免与引擎线程中正在进行的归并竞争。
+     * 彻底释放：先停网关阻断新事件，再取消协程、关闭线程；
+     * 待引擎线程退出后再复位对外状态，避免与归并线程竞争。
      */
     fun shutdown() {
         started = false
@@ -210,8 +229,10 @@ internal class PhoneEngine(
         executor.shutdown()
         // 引擎线程通常已空闲，这里只做有界等待。
         runCatching { executor.awaitTermination(500, TimeUnit.MILLISECONDS) }
+        // 线程退出后再补发结束事件、复位静音与状态。
         emitAllCallsEnded()
         changeMicMute(false)
+        callStore.clearAll()
     }
 
     /** 重新拉取设备/通话/信号，并刷新当前设备。 */
@@ -228,16 +249,33 @@ internal class PhoneEngine(
         }
     }
 
-    /** 切换当前设备，同时通知通话状态切换数据源。 */
+    /** 切换当前设备；只接受已连接设备，避免界面与拨号目标不一致。 */
     fun selectDevice(address: String) {
         scope.launch {
             val device = registry.device(address)
-            PhoneLog.engine.i {
-                "selectDevice($address): 当前设备 -> ${device?.displayName ?: "<未知>"}"
+            if (device == null || !device.isConnected) {
+                PhoneLog.engine.w {
+                    "selectDevice($address): ${if (device == null) "设备不存在" else "设备未连接"}，已忽略"
+                }
+                _events.tryEmit(PhoneEvent.Info("设备未连接，无法切换"))
+                return@launch
             }
+            PhoneLog.engine.i { "selectDevice($address): 当前设备 -> ${device.displayName}" }
             registry.select(address)
-            device?.let { callStore.selectDevice(address, it.displayName) }
+            callStore.selectDevice(address, device.displayName)
+            // 铃声跟随当前数据源，避免切走后另一台设备的铃声继续响。
+            ringtone.update(callStore.state.value)
+            // 切换后主动拉一次最新通话，避免展示缓存的旧快照。
+            gateway.refresh(address)
         }
+    }
+
+    /** 让设备列表的“当前设备”跟随通话数据源；没有数据源时选第一台已连接设备。 */
+    private fun syncActiveDevice() {
+        val callDevice = callStore.state.value.deviceId?.let { registry.device(it) }
+            ?.takeIf { it.isConnected }
+        if (callDevice != null) registry.select(callDevice.address)
+        else registry.selectConnectedIfNeeded()
     }
 
     /** 调试入口：构造模拟来电（仅 Mock 网关生效）。 */
@@ -257,25 +295,38 @@ internal class PhoneEngine(
             PhoneLog.engine.w { "connect($address): 蓝牙未开启" }
             return@withContext failure(PhoneError.BLUETOOTH_OFF, "蓝牙未开启")
         }
-        registry.device(address) ?: return@withContext failure(PhoneError.NO_DEVICE, "设备不存在")
+        val device = registry.device(address)
+            ?: return@withContext failure(PhoneError.NO_DEVICE, "设备不存在")
+        if (device.isConnected) {
+            PhoneLog.engine.d { "connect($address): 已连接，无需重复下发" }
+            return@withContext success()
+        }
         PhoneLog.engine.d { "connect($address): 请求 HFP 连接" }
         manualDisconnects.remove(address)
         reconnectAttempts.remove(address)
         registry.markConnecting(address)
         if (gateway.connect(address)) {
             PhoneLog.engine.i { "connect($address): 连接命令已下发" }
+            // 本地已标记 CONNECTING，立即刷新整体状态，无需等系统广播。
+            updateConnectionState()
             success()
         } else {
             PhoneLog.engine.w { "connect($address): 连接命令发送失败" }
+            // 命令未下发时回退“连接中”状态，避免界面永久停留。
+            registry.updateConnection(address, ProfileState.DISCONNECTED)
+            updateConnectionState()
             failure(PhoneError.NOT_READY, "连接命令发送失败")
         }
     }
 
     /** 断开手机；标记为主动断开以阻止自动重连。 */
     suspend fun disconnect(address: String): PhoneResult<Unit> = withContext(dispatcher) {
+        if (!started) return@withContext failure(PhoneError.NOT_READY, "中间件尚未启动")
         PhoneLog.engine.i { "disconnect($address): 主动断开，禁止自动重连" }
         manualDisconnects += address
         reconnectJobs.remove(address)?.cancel()
+        // 已经断开时直接成功，避免把“断开失败”误报给用户。
+        if (registry.device(address)?.isConnected == false) return@withContext success()
         if (gateway.disconnect(address)) success()
         else {
             PhoneLog.engine.w { "disconnect($address): 断开命令发送失败" }
@@ -285,6 +336,7 @@ internal class PhoneEngine(
 
     /** 发起配对，结果通过广播回调。 */
     suspend fun createBond(address: String): PhoneResult<Unit> = withContext(dispatcher) {
+        if (!started) return@withContext failure(PhoneError.NOT_READY, "中间件尚未启动")
         PhoneLog.engine.i { "createBond($address): 发起配对" }
         if (gateway.createBond(address)) success()
         else {
@@ -295,16 +347,22 @@ internal class PhoneEngine(
 
     /** 解除配对并清理该设备的本地记录。 */
     suspend fun removeBond(address: String): PhoneResult<Unit> = withContext(dispatcher) {
+        if (!started) return@withContext failure(PhoneError.NOT_READY, "中间件尚未启动")
         if (gateway.removeBond(address)) {
             PhoneLog.engine.i { "removeBond($address): 已解绑并清理本地状态" }
             manualDisconnects += address
             reconnectJobs.remove(address)?.cancel()
+            reconnectAttempts.remove(address)
             if (prefs.lastDeviceAddress == address) prefs.lastDeviceAddress = null
             pbap.disconnect(address)
             if (callStore.state.value.deviceId == address) emitAllCallsEnded()
             callStore.clearDevice(address)
+            // 解绑后 HFP 必然断开，先本地标记，避免界面短暂显示“已配对且已连接”。
+            registry.updateConnection(address, ProfileState.DISCONNECTED)
+            updateConnectionState()
             // 解绑可能发生在响铃过程中，按最新状态停掉铃声。
             ringtone.update(callStore.state.value)
+            syncActiveDevice()
             success()
         } else {
             PhoneLog.engine.w { "removeBond($address): 解除配对失败" }
@@ -322,6 +380,10 @@ internal class PhoneEngine(
         if (state.waiting != null) {
             PhoneLog.engine.w { "dial(${PhoneLog.mask(normalized)}): 有等待来电，拒绝拨号" }
             return@withContext failure(PhoneError.BUSY, "有等待来电，请先接听或拒接")
+        }
+        if (state.outgoing != null) {
+            PhoneLog.engine.w { "dial(${PhoneLog.mask(normalized)}): 已有去电，拒绝拨号" }
+            return@withContext failure(PhoneError.BUSY, "已有去电中的通话，请先处理")
         }
         if (state.hasCall) {
             PhoneLog.engine.w { "dial(${PhoneLog.mask(normalized)}): 已有通话，需走加拨" }
@@ -417,6 +479,20 @@ internal class PhoneEngine(
         }
     }
 
+    /** 取消去电中的一路（对方尚未接听）；有保持通话时保持不受影响。 */
+    suspend fun cancelOutgoing(): PhoneResult<Unit> = withContext(dispatcher) {
+        val outgoing = callStore.state.value.outgoing
+            ?: return@withContext failure(PhoneError.NO_CALL, "当前没有去电中的通话")
+        PhoneLog.engine.i {
+            "cancelOutgoing(): 取消 ${PhoneLog.mask(outgoing.number)}, callId=${outgoing.id}"
+        }
+        if (gateway.hangup(outgoing.deviceId, outgoing.id)) success()
+        else {
+            PhoneLog.engine.w { "cancelOutgoing(): 取消失败, callId=${outgoing.id}" }
+            failure(PhoneError.NOT_READY, "取消拨号失败")
+        }
+    }
+
     /** 挂断保持中的通话，不影响当前活动通话。 */
     suspend fun hangupHeld(): PhoneResult<Unit> = withContext(dispatcher) {
         val held = callStore.state.value.held
@@ -447,8 +523,8 @@ internal class PhoneEngine(
     }
 
     /**
-     * 保持/恢复。若 active + held 同时存在，等同切换。
-     * 标准 HFP 由 AT+CHLD=2 完成。
+     * 保持/恢复。若 active + held 同时存在，等同切换；
+     * 有等待来电或去电时直接拒绝。标准 HFP 由 AT+CHLD=2 完成。
      */
     suspend fun hold(): PhoneResult<Unit> = withContext(dispatcher) {
         val state = callStore.state.value
@@ -456,6 +532,10 @@ internal class PhoneEngine(
         if (state.waiting != null) {
             PhoneLog.engine.w { "hold(): 有等待来电，CHLD=2 会误接听，已阻止" }
             return@withContext failure(PhoneError.NOT_SUPPORTED, "有等待来电，请先接听或拒接")
+        }
+        // 去电中无法确定 CHLD=2 的作用目标，先要求处理第二路。
+        if (state.outgoing != null) {
+            return@withContext failure(PhoneError.BUSY, "有去电中的通话，请先处理")
         }
         val call = state.active ?: state.held
             ?: return@withContext failure(PhoneError.NO_CALL, "当前没有可保持/恢复的通话")
@@ -479,6 +559,10 @@ internal class PhoneEngine(
         val state = callStore.state.value
         if (state.waiting != null) {
             return@withContext failure(PhoneError.NOT_SUPPORTED, "有等待来电，请先接听或拒接")
+        }
+        // 去电中无法确定切换目标，先要求处理第二路。
+        if (state.outgoing != null) {
+            return@withContext failure(PhoneError.BUSY, "有去电中的通话，请先处理")
         }
         if (state.active != null && state.held == null) {
             return@withContext failure(PhoneError.NOT_SUPPORTED, "没有保持中的通话可切换")
@@ -689,6 +773,8 @@ internal class PhoneEngine(
 
     /** 网关事件总入口：更新设备/通话/音频，并驱动铃声与重连。 */
     private fun onGatewayEvent(event: HfpEvent) {
+        // stop/shutdown 后仍可能有已入队的事件，统一丢弃，避免状态被重新写回。
+        if (!started) return
         // 每条网关事件留痕，排查“状态为何未变”时可按事件顺序比对。
         // AG 电量/信号可能频繁上报，降为 VERBOSE，避免 DEBUG 刷屏。
         if (event is HfpEvent.AgChanged) {
@@ -710,6 +796,10 @@ internal class PhoneEngine(
                 } else {
                     PhoneLog.engine.i { "蓝牙关闭: 清理设备、通话与铃声" }
                     pbap.stop()
+                    serviceRestartJob?.cancel()
+                    reconnectJobs.values.forEach { it.cancel() }
+                    reconnectJobs.clear()
+                    reconnectAttempts.clear()
                     registry.clearConnections()
                     changeMicMute(false)
                     emitAllCallsEnded()
@@ -722,10 +812,18 @@ internal class PhoneEngine(
             is HfpEvent.BondChanged -> {
                 refreshDevices()
                 if (registry.device(event.address) == null) {
+                    PhoneLog.engine.i { "设备已解绑: ${event.address}" }
+                    // 解绑后清理重连任务与上次设备记录，避免下次开机自动连接已不存在的设备。
+                    reconnectJobs.remove(event.address)?.cancel()
+                    reconnectAttempts.remove(event.address)
+                    manualDisconnects.remove(event.address)
+                    if (prefs.lastDeviceAddress == event.address) prefs.lastDeviceAddress = null
                     pbap.disconnect(event.address)
                     if (callStore.state.value.deviceId == event.address) emitAllCallsEnded()
                     callStore.clearDevice(event.address)
                     ringtone.update(callStore.state.value)
+                    // 数据源可能跟随另一台仍有通话的设备，同步设备焦点。
+                    syncActiveDevice()
                 }
             }
 
@@ -784,12 +882,17 @@ internal class PhoneEngine(
 
     /** 非 HFP 终止场景（蓝牙关闭/断开/停止）主动补发结束事件。 */
     private fun emitAllCallsEnded() {
-        val calls = callStore.state.value.calls
+        val state = callStore.state.value
+        val calls = state.calls
         if (calls.isNotEmpty()) {
             PhoneLog.engine.i { "补发通话结束: ${calls.size} 路" }
         }
         calls.forEach { _events.tryEmit(PhoneEvent.CallEnded(it)) }
-        if (calls.isNotEmpty()) _events.tryEmit(PhoneEvent.SessionEnded(calls.last()))
+        if (calls.isNotEmpty()) {
+            _events.tryEmit(PhoneEvent.SessionEnded(state.primaryCall ?: calls.last()))
+        }
+        // 已经主动补发结束事件，同步基准快照；随后清空/重算状态时不再重复上报。
+        lastPublishedState = PhoneCallState()
     }
 
     /** 对外通话状态变化：补发阶段/结束事件，并在无通话时自动恢复麦克风。 */
@@ -819,6 +922,8 @@ internal class PhoneEngine(
             val removed = previous.calls
                 .filter { it.id !in currentIds }
                 .filterNot { conferenceStarted && isConferenceParticipant(it) }
+                // 部分 AG 在会议成员变化时会换 call id，不能把旧会议当成“挂断”。
+                .filterNot { it.isMultiParty && current.conference != null }
             removed.forEach { _events.tryEmit(PhoneEvent.CallEnded(it)) }
 
             if (current.calls.isEmpty()) {
@@ -848,6 +953,7 @@ internal class PhoneEngine(
         val active = registry.activeDevice()
         if (current.deviceId == address || (!current.hasCall && active?.address == address)) {
             registry.device(address)?.let { callStore.selectDevice(address, it.displayName) }
+            ringtone.update(callStore.state.value)
         }
         gateway.refresh(address)
         loadContactNames()
@@ -864,22 +970,20 @@ internal class PhoneEngine(
         ) {
             return
         }
-        lastContactLoadElapsed = now
         contactsLoading = true
         PhoneLog.engine.d { "开始加载联系人用于回填" }
         scope.launch {
             try {
-                val matches = contacts.contacts(CONTACT_LOOKUP_LIMIT)
-                    .mapNotNull { contact ->
-                        val name = contact.name?.takeIf { it.isNotBlank() }
-                        val photoUri = contact.photoUri?.takeIf { it.isNotBlank() }
-                        if (name == null && photoUri == null) return@mapNotNull null
-                        val key = contact.number.filter { it.isDigit() }.takeLast(10)
-                        key.takeIf { it.isNotBlank() }?.let { it to ContactMatch(name, photoUri) }
-                    }
-                    .toMap()
-                callStore.updateContacts(matches)
-                PhoneLog.engine.d { "联系人回填: ${matches.size} 个号码匹配" }
+                val list = contacts.contacts(CONTACT_LOOKUP_LIMIT)
+                // 空结果可能是权限被回收或查询失败，保留已有姓名/头像，避免误清空。
+                if (list.isEmpty()) {
+                    PhoneLog.engine.d { "联系人回填: 未读取到联系人，保留已有映射" }
+                } else {
+                    callStore.updateContacts(list)
+                    PhoneLog.engine.d { "联系人回填: 读取 ${list.size} 条" }
+                }
+                // 读取完成后刷新节流时间，避免短时间内重复全表查询。
+                lastContactLoadElapsed = SystemClock.elapsedRealtime()
             } finally {
                 contactsLoading = false
             }
@@ -896,13 +1000,9 @@ internal class PhoneEngine(
         callStore.clearDevice(address)
         // 另一台手机可能仍在响铃，这里按最新状态重算，而不是直接停铃。
         ringtone.update(callStore.state.value)
-        registry.selectConnectedIfNeeded()
-        // 优先跟随仍有通话的设备，其次才是任意已连接设备。
-        val callDeviceId = callStore.state.value.deviceId
-        val target = callDeviceId?.let { registry.device(it) }?.takeIf { it.isConnected }
-            ?: registry.activeDevice()
-        target?.let {
-            if (callDeviceId != null) registry.select(it.address)
+        // 数据源优先跟随仍有通话的设备，其次才是任意已连接设备。
+        syncActiveDevice()
+        registry.activeDevice()?.takeIf { it.isConnected }?.let {
             callStore.selectDevice(it.address, it.displayName)
         }
         scheduleReconnect(address)
@@ -910,6 +1010,7 @@ internal class PhoneEngine(
 
     /** 自动重连：递增退避，最多 [MAX_RECONNECT_ATTEMPTS] 次；主动断开不重连。 */
     private fun scheduleReconnect(address: String) {
+        if (!started) return
         if (!config.autoReconnect || address in manualDisconnects) return
         val attempt = reconnectAttempts.getOrDefault(address, 0)
         if (attempt >= MAX_RECONNECT_ATTEMPTS) {
@@ -949,6 +1050,8 @@ internal class PhoneEngine(
             PhoneLog.engine.i { "重建 HFP 网关代理" }
             gateway.stop()
             gateway.start()
+            // 蓝牙服务重启可能同时回收 PBAP 代理，这里一并补获。
+            pbap.start()
             refreshDevices()
         }
     }
@@ -974,6 +1077,11 @@ internal class PhoneEngine(
     private fun maybeAutoConnect() {
         if (!config.autoConnectLastDevice) return
         val address = prefs.lastDeviceAddress ?: return
+        // 用户主动断开后，本次进程内不再自动连接。
+        if (address in manualDisconnects) {
+            PhoneLog.engine.d { "autoConnect($address): 用户已主动断开，跳过" }
+            return
+        }
         val device = registry.device(address) ?: return
         if (device.isConnected || device.hfpState == ProfileState.CONNECTING) return
         PhoneLog.engine.i { "autoConnect($address): 自动连接上次使用的设备" }
@@ -1000,12 +1108,9 @@ internal class PhoneEngine(
         _connectionState.value = next
     }
 
-    /** 取当前可用设备：优先当前设备，否则任意已连接设备。 */
-    private fun connectedDevice(): PhoneDevice? {
-        val active = registry.activeDevice()
-        if (active?.isConnected == true) return active
-        return registry.devices.value.firstOrNull { it.isConnected }
-    }
+    /** 取当前设备；显式选中但未连接时返回 null，避免拨号发到另一台手机。 */
+    private fun connectedDevice(): PhoneDevice? =
+        registry.activeDevice()?.takeIf { it.isConnected }
 
     /** 音频操作优先跟随当前通话所属设备。 */
     private fun activeAudioDevice(): PhoneDevice? {

@@ -5,6 +5,7 @@ import android.content.Context
 /** 保存跨进程重启的轻量配置（当前只记录上次连接的设备）。 */
 internal class PhonePreferences(context: Context) {
 
+    /** 私有 SharedPreferences，仅中间件使用。 */
     private val prefs = context.applicationContext
         .getSharedPreferences("bluetooth_phone", Context.MODE_PRIVATE)
 
@@ -16,6 +17,7 @@ internal class PhonePreferences(context: Context) {
         }
 
     private companion object {
+        /** 上次连接设备地址的存储键。 */
         const val KEY_LAST_DEVICE = "last_device"
     }
 }

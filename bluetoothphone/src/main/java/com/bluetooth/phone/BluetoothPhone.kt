@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * 车机蓝牙电话中间件入口。
+ * 车机蓝牙电话中间层入口。
  *
  * 车机无 SIM 时，通话状态全部来自 HFP Client，不使用 TelephonyManager/Telecom。
  * 典型用法：
@@ -39,8 +39,10 @@ import kotlinx.coroutines.flow.StateFlow
  */
 class BluetoothPhone private constructor(
     context: Context,
+    /** 中间层运行参数。 */
     val config: BluetoothPhoneConfig
 ) {
+    /** 内部状态机：所有 HFP 事件与状态写入都在这里收口。 */
     private val engine = PhoneEngine(context, config)
 
     /** 已配对手机列表，界面可直接订阅渲染。 */
@@ -55,7 +57,7 @@ class BluetoothPhone private constructor(
     /** 中间件整体状态，适合状态栏或首页展示。 */
     val connectionState: StateFlow<PhoneConnectionState> = engine.connectionState
 
-    /** 一次性提示事件，界面用 Toast/Snackbar 消费即可。 */
+    /** 一次性提示事件；不重放，界面在 STARTED 后订阅即可。 */
     val events: SharedFlow<PhoneEvent> = engine.events
 
     /** true 表示当前运行在模拟 HFP，不是真实车机链路。 */
@@ -67,13 +69,13 @@ class BluetoothPhone private constructor(
     /** 停止监听，但保留实例；之后仍可再次 [start]。 */
     fun stop() = engine.stop()
 
-    /** 释放引擎资源；由 [companion.init] / [companion.shutdown] 统一调用。 */
+    /** 释放引擎资源；由 [init] / [shutdown] 统一调用。 */
     private fun release() = engine.shutdown()
 
     /** 主动刷新设备列表、通话和信号状态。 */
     fun refresh() = engine.refresh()
 
-    /** 多设备时切换当前操作的手机。 */
+    /** 多设备时切换当前操作的手机；仅已连接设备生效，未连接时发提示事件。 */
     fun selectDevice(address: String) = engine.selectDevice(address)
 
     /** 仅 Mock 网关有效，用于没有真机时模拟来电。 */
@@ -105,6 +107,9 @@ class BluetoothPhone private constructor(
 
     /** 挂断当前活动通话。 */
     suspend fun hangup(): PhoneResult<Unit> = engine.hangup()
+
+    /** 取消去电（对方尚未接听），不影响保持中的通话。 */
+    suspend fun cancelOutgoing(): PhoneResult<Unit> = engine.cancelOutgoing()
 
     /** 挂断保持中的通话。 */
     suspend fun hangupHeld(): PhoneResult<Unit> = engine.hangupHeld()
@@ -179,6 +184,7 @@ class BluetoothPhone private constructor(
 
         /** 创建并启动进程内单例；建议在 Application.onCreate 调用。 */
         @JvmStatic
+        @JvmOverloads
         fun init(
             context: Context,
             config: BluetoothPhoneConfig = BluetoothPhoneConfig()
@@ -193,9 +199,12 @@ class BluetoothPhone private constructor(
                         "autoReconnect=${config.autoReconnect}, log=${config.logLevel}"
                 }
                 instance?.release()
+                // 先置空，避免构造失败时 `get()` 返回一个已释放的旧实例。
+                instance = null
                 val created = BluetoothPhone(context.applicationContext, config)
-                instance = created
+                // 先请求启动再发布实例，避免其他线程拿到尚未启动的中间层。
                 created.start()
+                instance = created
                 return created
             }
         }
@@ -216,7 +225,7 @@ class BluetoothPhone private constructor(
                 )
                 // 静默降级到 Mock 会让界面“看起来正常”，必须留一条警告。
                 PhoneLog.phone.w {
-                    "get(): 未显式 init，按系统能力自动降级，mock=${config.useMockGateway}"
+                    "get(): 未显式 init，按系统能力自动选择，mock=${config.useMockGateway}"
                 }
                 return init(context, config)
             }

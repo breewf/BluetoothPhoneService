@@ -25,10 +25,18 @@ enum class PhoneError {
 /** 统一返回值：成功带数据，失败带错误码与可选提示。 */
 sealed interface PhoneResult<out T> {
     /** 调用成功。 */
-    data class Success<T>(val value: T) : PhoneResult<T>
+    data class Success<T>(
+        /** 成功返回的数据。 */
+        val value: T
+    ) : PhoneResult<T>
 
     /** 调用失败；message 适合直接展示给用户。 */
-    data class Failure(val error: PhoneError, val message: String? = null) : PhoneResult<Nothing>
+    data class Failure(
+        /** 错误码。 */
+        val error: PhoneError,
+        /** 可直接展示的提示；null 时由界面按错误码兜底。 */
+        val message: String? = null
+    ) : PhoneResult<Nothing>
 }
 
 /** 成功时取值，失败返回 null。 */

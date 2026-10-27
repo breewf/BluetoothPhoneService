@@ -39,7 +39,10 @@ import kotlin.time.Duration.Companion.milliseconds
  */
 class MainActivity : AppCompatActivity() {
 
+    /** 页面 ViewBinding。 */
     private lateinit var binding: ActivityMainBinding
+
+    /** 页面状态与动作入口。 */
     private val viewModel: PhoneViewModel by viewModels()
 
     /** 通话/设备列表快照：内容未变时跳过重建，避免无关状态触发 View 重建。 */
@@ -49,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     /** 通话行绑定缓存，供计时器每秒只更新对应行的时长。 */
     private val callRows = mutableMapOf<String, ItemCallBinding>()
 
+    /** 权限申请结果：无论是否全部授予都通知 ViewModel 补启动。 */
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -84,8 +88,8 @@ class MainActivity : AppCompatActivity() {
         callSection.btnAnswerWaitingHold.setOnClickListener { viewModel.answerWaitingAndHold() }
         callSection.btnAnswerWaitingEnd.setOnClickListener { viewModel.answerWaitingAndEndActive() }
 
-        // 当前通话：挂断 / 保持或切换 / 合并会议 / 挂断保持中的一路
-        callSection.btnHangup.setOnClickListener { viewModel.hangup() }
+        // 当前通话：挂断或取消去电 / 保持或切换 / 合并会议 / 挂断保持中的一路
+        callSection.btnHangup.setOnClickListener { viewModel.hangupOrCancel() }
         callSection.btnHoldOrSwap.setOnClickListener { viewModel.holdOrSwap() }
         callSection.btnMerge.setOnClickListener { viewModel.merge() }
         callSection.btnHangupHeld.setOnClickListener { viewModel.hangupHeld() }
@@ -262,18 +266,21 @@ class MainActivity : AppCompatActivity() {
             rowIncoming.isVisible = call.canAnswer
 
             // 第二路等待来电：拒接 / 只挂断 / 接听策略
-            groupWaiting.isVisible = call.waiting != null
+            groupWaiting.isVisible = call.canHangupWaiting
             btnAnswerWaitingHold.isEnabled = call.canAnswerWaitingAndHold
             btnAnswerWaitingEnd.isEnabled = call.canAnswerWaitingAndEndActive
             btnHangupWaiting.isEnabled = call.canHangupWaiting
 
-            // 活动/保持操作区
-            groupActive.isVisible = call.active != null
-            groupHeld.isVisible = call.active == null && call.held != null
+            // 活动/保持操作区；去电中也要展示“取消拨号”。
+            groupActive.isVisible = call.canHangup || call.canCancelOutgoing
+            // 仅“只有保持通话”时展示恢复区；保持中加拨时由活动区提供取消拨号/挂断保持。
+            groupHeld.isVisible = call.active == null && call.outgoing == null &&
+                call.canHangupHeld
             btnResumeHeld.isEnabled = call.canResume
+            btnHangup.renderText(if (call.canHangup) "挂断" else "取消拨号")
 
             // CHLD=2 在等待来电存在时会直接接听，因此此时不展示“保持/切换”。
-            btnHoldOrSwap.isVisible = call.waiting == null
+            btnHoldOrSwap.isVisible = call.canHold
             btnHoldOrSwap.renderText(if (call.canSwap) "切换" else "保持")
             // 仅两路普通通话且系统支持合并时展示
             btnMerge.isVisible = call.canMerge
@@ -357,7 +364,9 @@ class MainActivity : AppCompatActivity() {
                 row.tvDeviceName.text = device.displayName + if (device.isActive) "（当前）" else ""
                 // 地址与 HFP 连接状态
                 row.tvDeviceInfo.text = "${device.address}  ${device.hfpState.label()}"
-                // 切换当前操作的手机
+                // 切换当前操作的手机：仅已连接且非当前设备可用
+                row.btnSelectDevice.isEnabled = device.isConnected && !device.isActive
+                row.btnSelectDevice.text = if (device.isActive) "当前" else "选择"
                 row.btnSelectDevice.setOnClickListener { viewModel.selectDevice(device.address) }
                 // 连接或断开该手机
                 row.btnConnectDevice.text = if (device.isConnected) "断开" else "连接"

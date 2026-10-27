@@ -1,5 +1,6 @@
 package com.bluetooth.phone.hfp
 
+import android.os.SystemClock
 import com.bluetooth.phone.api.AudioState
 import com.bluetooth.phone.api.BondState
 import com.bluetooth.phone.api.CallState
@@ -9,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -27,25 +29,39 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
 
     /** 模拟设备，状态可变以模拟连接过程。 */
     private data class FakeDevice(
+        /** 设备地址。 */
         val address: String,
+        /** 展示名称。 */
         val name: String,
+        /** 配对状态。 */
         var bondState: BondState,
+        /** HFP 连接状态。 */
         var state: ProfileState
     )
 
     /** 模拟通话，多路组合即可构造三方场景。 */
     private data class FakeCall(
+        /** 通话 ID。 */
         val id: String,
+        /** 当前状态。 */
         var state: CallState,
+        /** 号码。 */
         val number: String?,
+        /** 是否会议通话。 */
         var isMultiParty: Boolean,
+        /** 是否去电。 */
         val isOutgoing: Boolean,
+        /** 是否带内铃声。 */
         val isInBandRing: Boolean,
+        /** 创建时刻（elapsedRealtime）。 */
         val createdAtElapsed: Long
     )
 
-    /** 模拟事件流，结构与真实网关一致。 */
-    private val _events = MutableSharedFlow<HfpEvent>(extraBufferCapacity = 64)
+    /** 模拟事件流，结构与真实网关一致；满时丢弃最旧事件，避免演示状态滞后。 */
+    private val _events = MutableSharedFlow<HfpEvent>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     override val events: SharedFlow<HfpEvent> = _events.asSharedFlow()
 
     /** 保护模拟状态的锁；回调可能来自协程线程。 */
@@ -54,7 +70,10 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
     /** 递增的通话 id。 */
     private val nextId = AtomicLong(1)
 
+    /** 模拟器的协程作用域，stop 后重建。 */
     private var scope = newScope()
+
+    /** 是否已启动。 */
     private var started = false
 
     /** 预置两台已配对手机，便于演示多设备切换。 */
@@ -72,8 +91,13 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
             ProfileState.DISCONNECTED
         )
     )
+    /** 每台设备的模拟通话列表。 */
     private val calls = mutableMapOf<String, MutableList<FakeCall>>()
+
+    /** 每台设备的模拟音频状态。 */
     private val audio = mutableMapOf<String, AudioState>()
+
+    /** 每台设备模拟上报的 AG 状态。 */
     private val ag = mutableMapOf<String, HfpAgState>()
 
     /** 模拟网关无代理，始终就绪。 */
@@ -82,13 +106,24 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
     /** 模拟网关支持会议合并，便于演示三方通话。 */
     override val supportsConference: Boolean get() = true
 
-    /** 启动模拟器并广播蓝牙已开启。 */
+    /** 启动模拟器并广播蓝牙已开启；重启后补发已连接设备的状态。 */
     override fun start() {
         synchronized(lock) {
             if (started) return
             if (scope.coroutineContext[Job]?.isActive != true) scope = newScope()
             started = true
             _events.tryEmit(HfpEvent.AdapterChanged(true))
+            // 对应真实栈服务重连后的补发，避免 stop/start 后丢失设备与通话状态。
+            devices.values.filter { it.state == ProfileState.CONNECTED }.forEach { device ->
+                _events.tryEmit(
+                    HfpEvent.ConnectionChanged(device.address, ProfileState.CONNECTED)
+                )
+                emitCalls(device.address)
+                emitAg(device.address)
+                audio[device.address]?.let {
+                    _events.tryEmit(HfpEvent.AudioChanged(device.address, it, false))
+                }
+            }
         }
     }
 
@@ -162,8 +197,7 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
                     battery = 82,
                     signal = 4,
                     roaming = false,
-                    operatorName = "Demo Carrier",
-                    inBandRing = false
+                    operatorName = "Demo Carrier"
                 )
                 _events.tryEmit(HfpEvent.ConnectionChanged(address, ProfileState.CONNECTED))
                 emitCalls(address)
@@ -205,7 +239,7 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
                 isMultiParty = false,
                 isOutgoing = true,
                 isInBandRing = false,
-                createdAtElapsed = android.os.SystemClock.elapsedRealtime()
+                createdAtElapsed = SystemClock.elapsedRealtime()
             )
             list.add(call)
             emitCalls(address)
@@ -304,6 +338,8 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
             delay(200.milliseconds)
             synchronized(lock) {
                 if (!started) return@synchronized
+                // 期间设备可能已断开，避免把已释放的音频重新标记为连接。
+                if (devices[address]?.state != ProfileState.CONNECTED) return@synchronized
                 audio[address] = AudioState.CONNECTED
                 _events.tryEmit(HfpEvent.AudioChanged(address, AudioState.CONNECTED, true))
             }
@@ -363,7 +399,7 @@ internal class FakeHfpGateway : HfpGateway, DebugCallSimulator {
                     isMultiParty = false,
                     isOutgoing = false,
                     isInBandRing = false,
-                    createdAtElapsed = android.os.SystemClock.elapsedRealtime()
+                    createdAtElapsed = SystemClock.elapsedRealtime()
                 )
             )
             emitCalls(address)

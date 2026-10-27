@@ -3,7 +3,6 @@
 
     <!-- 车机 HFP Client 必须由系统应用持有；普通应用安装时该权限不会授予。 -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED" />
 
     <uses-permission android:name="android.permission.READ_CONTACTS" />

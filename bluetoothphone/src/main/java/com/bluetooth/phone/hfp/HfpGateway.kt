@@ -8,61 +8,102 @@ import kotlinx.coroutines.flow.SharedFlow
 
 /** 网关层的设备快照，字段与 BluetoothDevice 解耦。 */
 internal data class GatewayDevice(
+    /** MAC 地址。 */
     val address: String,
+    /** 蓝牙名称（别名优先）。 */
     val name: String?,
+    /** 配对状态。 */
     val bondState: BondState,
+    /** HFP 连接状态。 */
     val hfpState: ProfileState
 )
 
 /** 网关层的一路 HFP 通话，尚未做 UI 归并。 */
 internal data class HfpCall(
+    /** 通话 ID。 */
     val id: String,
+    /** 原始通话状态。 */
     val state: CallState,
+    /** 号码。 */
     val number: String?,
+    /** 是否会议通话。 */
     val isMultiParty: Boolean,
+    /** 是否去电。 */
     val isOutgoing: Boolean,
+    /** 是否带内铃声：手机侧已播放铃声时，车机不再播放本地铃声。 */
     val isInBandRing: Boolean,
+    /** 创建时刻（elapsedRealtime），用于估算启动前的接通时间。 */
     val createdAtElapsed: Long
 )
 
 /** AG（手机侧）上报的信号/电量/运营商信息。 */
 internal data class HfpAgState(
+    /** 电量百分比。 */
     val battery: Int? = null,
+    /** 信号等级（通常 0–5）。 */
     val signal: Int? = null,
+    /** 是否漫游。 */
     val roaming: Boolean? = null,
-    val operatorName: String? = null,
-    val inBandRing: Boolean? = null
+    /** 运营商名称。 */
+    val operatorName: String? = null
 )
 
 /** 网关向上层发送的统一事件。 */
 internal sealed interface HfpEvent {
     /** 蓝牙开关变化。 */
-    data class AdapterChanged(val enabled: Boolean) : HfpEvent
+    data class AdapterChanged(
+        /** 是否已开启。 */
+        val enabled: Boolean
+    ) : HfpEvent
 
     /** 配对关系变化。 */
-    data class BondChanged(val address: String) : HfpEvent
+    data class BondChanged(
+        /** 变化的设备地址。 */
+        val address: String
+    ) : HfpEvent
 
     /** HFP Profile 连接状态变化。 */
-    data class ConnectionChanged(val address: String, val state: ProfileState) : HfpEvent
+    data class ConnectionChanged(
+        /** 设备地址。 */
+        val address: String,
+        /** 新的连接状态。 */
+        val state: ProfileState
+    ) : HfpEvent
 
     /** 通话音频状态变化。 */
     data class AudioChanged(
+        /** 设备地址。 */
         val address: String,
+        /** 音频状态。 */
         val state: AudioState,
+        /** 是否宽带语音。 */
         val wideband: Boolean
     ) : HfpEvent
 
     /** 当前通话列表变化，是三方通话状态的来源。 */
-    data class CallsChanged(val address: String, val calls: List<HfpCall>) : HfpEvent
+    data class CallsChanged(
+        /** 设备地址。 */
+        val address: String,
+        /** 该设备当前未结束的通话。 */
+        val calls: List<HfpCall>
+    ) : HfpEvent
 
     /** 信号/电量/运营商变化。 */
-    data class AgChanged(val address: String, val ag: HfpAgState) : HfpEvent
+    data class AgChanged(
+        /** 设备地址。 */
+        val address: String,
+        /** 最新 AG 状态。 */
+        val ag: HfpAgState
+    ) : HfpEvent
 
     /** 系统蓝牙服务进程重启，需要重新获取代理。 */
     data object ServiceLost : HfpEvent
 
     /** 网关内部错误，向上转为 PhoneEvent.Error。 */
-    data class Error(val message: String) : HfpEvent
+    data class Error(
+        /** 错误文案。 */
+        val message: String
+    ) : HfpEvent
 
     /** 日志摘要：只输出类型与关键字段，不展开完整 call 列表。 */
     fun summary(): String = when (this) {

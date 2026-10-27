@@ -9,6 +9,7 @@ import com.bluetooth.phone.api.CallInfo
 import com.bluetooth.phone.api.CallKind
 import com.bluetooth.phone.api.CallState
 import com.bluetooth.phone.api.CallUiState
+import com.bluetooth.phone.api.Contact
 import com.bluetooth.phone.api.PhoneCallState
 import com.bluetooth.phone.hfp.HfpCall
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,7 +18,9 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /** 号码匹配到的联系人信息，供通话界面展示姓名和头像。 */
 internal data class ContactMatch(
+    /** 联系人姓名。 */
     val name: String?,
+    /** 头像 content URI。 */
     val photoUri: String?
 )
 
@@ -30,8 +33,14 @@ internal class CallStateStore(
 ) {
 
     /** 每台设备对应的音频快照。 */
-    private data class AudioSnapshot(val state: AudioState, val wideband: Boolean)
+    private data class AudioSnapshot(
+        /** SCO/eSCO 状态。 */
+        val state: AudioState,
+        /** 是否宽带语音。 */
+        val wideband: Boolean
+    )
 
+    /** 内部可变通话快照。 */
     private val _state = MutableStateFlow(PhoneCallState())
 
     /** 对外唯一的通话状态。 */
@@ -39,13 +48,21 @@ internal class CallStateStore(
 
     /** 按设备缓存通话列表，切换设备时不丢失状态。 */
     private val callsByDevice = mutableMapOf<String, List<CallInfo>>()
+
+    /** 按设备缓存 SCO/eSCO 音频快照。 */
     private val audioByDevice = mutableMapOf<String, AudioSnapshot>()
 
     /** 合并会议前的第二路快照，会议中继续展示其姓名/头像。 */
     private val conferencePeers = mutableMapOf<String, CallInfo>()
 
+    /** 当前数据源设备地址。 */
     private var currentDeviceId: String? = null
+
+    /** 当前数据源设备名称。 */
     private var currentDeviceName: String? = null
+
+    /** 每台设备的展示名称，切换数据源时用于恢复名称。 */
+    private val namesByDevice = mutableMapOf<String, String?>()
 
     /** 号码后 10 位 → 联系人信息，用于回填姓名和头像。 */
     private var contactsByNumber: Map<String, ContactMatch> = emptyMap()
@@ -59,8 +76,9 @@ internal class CallStateStore(
     /** 切换当前设备并重新计算对外的 [state]。 */
     fun selectDevice(address: String, name: String?) {
         PhoneLog.state.d { "切换数据源: $address (${name ?: "<未知>"})" }
+        if (name != null) namesByDevice[address] = name
         currentDeviceId = address
-        currentDeviceName = name
+        currentDeviceName = name ?: namesByDevice[address]
         recompute()
     }
 
@@ -117,6 +135,7 @@ internal class CallStateStore(
             .sortedBy { it.state.order() }
 
         callsByDevice[deviceId] = mapped
+        if (deviceName != null) namesByDevice[deviceId] = deviceName
         rememberConferencePeer(deviceId, previous.values, mapped)
         // 归并输入留痕：排查“第二路为何没显示”时看这里。
         PhoneLog.state.d {
@@ -124,13 +143,13 @@ internal class CallStateStore(
                 mapped.joinToString { "${it.state}:${PhoneLog.mask(it.number)}" } + "]"
         }
 
-        if (mapped.isNotEmpty() && currentDeviceId?.let { callsByDevice[it] }.isNullOrEmpty()) {
+        // 当前设备没有通话时，自动跟随有通话的设备，保证第二台手机的来电可见。
+        val currentCalls = currentDeviceId?.let { callsByDevice[it] }
+        if (currentCalls == null || (mapped.isNotEmpty() && currentCalls.isEmpty())) {
             currentDeviceId = deviceId
-            currentDeviceName = deviceName
-        }
-        if (currentDeviceId == null) {
-            currentDeviceId = deviceId
-            currentDeviceName = deviceName
+            currentDeviceName = deviceName ?: namesByDevice[deviceId]
+        } else if (currentDeviceId == deviceId) {
+            currentDeviceName = deviceName ?: namesByDevice[deviceId]
         }
         recompute()
     }
@@ -141,22 +160,30 @@ internal class CallStateStore(
         callsByDevice.remove(deviceId)
         audioByDevice.remove(deviceId)
         conferencePeers.remove(deviceId)
+        namesByDevice.remove(deviceId)
         if (currentDeviceId == deviceId) {
             currentDeviceId = callsByDevice.entries.firstOrNull { it.value.isNotEmpty() }?.key
-            currentDeviceName = null
+            currentDeviceName = currentDeviceId?.let { namesByDevice[it] }
         }
         recompute()
     }
 
-    /** 更新联系人映射，并回填已有通话和会议对方的姓名/头像。 */
-    fun updateContacts(matches: Map<String, ContactMatch>) {
-        contactsByNumber = matches
+    /** 用最新联系人列表重建号码映射，并回填已有通话和会议对方的姓名/头像。 */
+    fun updateContacts(contacts: List<Contact>) {
+        contactsByNumber = buildMap {
+            contacts.forEach { contact ->
+                val name = contact.name?.takeIf { it.isNotBlank() }
+                val photoUri = contact.photoUri?.takeIf { it.isNotBlank() }
+                if (name == null && photoUri == null) return@forEach
+                normalize(contact.number)?.let { put(it, ContactMatch(name, photoUri)) }
+            }
+        }
         callsByDevice.replaceAll { _, calls ->
             calls.map { it.withContact(contactMatch(it.number)) }
         }
         conferencePeers.replaceAll { _, call -> call.withContact(contactMatch(call.number)) }
         recompute()
-        PhoneLog.state.d { "联系人映射更新: ${matches.size} 个号码" }
+        PhoneLog.state.d { "联系人映射更新: ${contactsByNumber.size} 个号码" }
     }
 
     /** 更新会议合并能力；能力变化后 [PhoneCallState.canMerge] 会同步变化。 */
@@ -180,6 +207,7 @@ internal class CallStateStore(
         callsByDevice.clear()
         audioByDevice.clear()
         conferencePeers.clear()
+        namesByDevice.clear()
         currentDeviceId = null
         currentDeviceName = null
         micMuted = false
@@ -188,7 +216,9 @@ internal class CallStateStore(
 
     /** 按设备更新 SCO/eSCO 音频状态。 */
     fun updateAudio(deviceId: String, state: AudioState, wideband: Boolean) {
-        audioByDevice[deviceId] = AudioSnapshot(state, wideband)
+        val snapshot = AudioSnapshot(state, wideband)
+        if (audioByDevice[deviceId] == snapshot) return
+        audioByDevice[deviceId] = snapshot
         recompute()
     }
 
@@ -205,8 +235,11 @@ internal class CallStateStore(
         }
         if (conferencePeers[deviceId] != null) return
         // 会议由“活动 + 保持”合并而来，保留合并前那一路的姓名/头像。
+        // 部分 AG 会沿用活动 call 的 id，另一些沿用保持 call 的 id，两种都要兼容。
         val peer = previousCalls.firstOrNull {
             it.id != conference.id && (it.isHeld || it.state == CallState.WAITING)
+        } ?: previousCalls.firstOrNull {
+            it.id != conference.id && it.isActive
         } ?: return
         conferencePeers[deviceId] = peer
         PhoneLog.state.i {
@@ -217,9 +250,9 @@ internal class CallStateStore(
     /** 把扁平通话列表归并为 active/held/incoming/waiting/conference 与 UI 阶段。 */
     private fun recompute() {
         val calls = currentDeviceId?.let { callsByDevice[it] }.orEmpty()
-        val active = calls.firstOrNull { it.state == CallState.ACTIVE }
         // 部分 AG 会把第二路来电上报成 INCOMING，有活动通话时统一归一化为等待来电。
-        val normalizedCalls = if (active != null) {
+        val hasActive = calls.any { it.state == CallState.ACTIVE }
+        val normalizedCalls = if (hasActive) {
             if (calls.any { it.state == CallState.INCOMING }) {
                 PhoneLog.state.d { "AG 将第二路上报为 INCOMING，已归一化为 WAITING" }
             }
@@ -229,6 +262,7 @@ internal class CallStateStore(
         } else {
             calls
         }
+        val active = normalizedCalls.firstOrNull { it.state == CallState.ACTIVE }
         val held = normalizedCalls.firstOrNull { it.isHeld }
         val incoming = normalizedCalls.firstOrNull { it.state == CallState.INCOMING }
         val waiting = normalizedCalls.firstOrNull { it.state == CallState.WAITING }
@@ -255,8 +289,8 @@ internal class CallStateStore(
             // 新来电优先于其他阶段，确保会议/通话中也能立刻展示第二路。
             waiting != null -> CallUiState.WAITING
             incoming != null -> CallUiState.INCOMING
-            // 活动会议是主界面；但活动普通通话 + 保持会议属于多路通话。
-            active?.isMultiParty == true -> CallUiState.CONFERENCE
+            // 会议是主界面；会议旁边还有一路普通通话时属于多路通话。
+            active?.isMultiParty == true && held == null && outgoing == null -> CallUiState.CONFERENCE
             active != null && (held != null || outgoing != null) -> CallUiState.MULTI_CALL
             active != null -> CallUiState.ACTIVE
             outgoing != null && held == null -> CallUiState.OUTGOING

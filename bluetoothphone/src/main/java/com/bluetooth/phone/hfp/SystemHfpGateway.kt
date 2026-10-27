@@ -20,6 +20,7 @@ import com.bluetooth.phone.api.CallState
 import com.bluetooth.phone.api.PhoneLogLevel
 import com.bluetooth.phone.api.ProfileState
 import com.bluetooth.phone.core.PhoneLog
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -55,6 +56,7 @@ internal class SystemHfpGateway(
         const val ACTION_CALL_CHANGED =
             "android.bluetooth.headsetclient.profile.action.AG_CALL_CHANGED"
 
+        // 系统广播/AG 事件使用的 extra key。
         const val EXTRA_AUDIO_WBS =
             "android.bluetooth.headsetclient.extra.AUDIO_WBS"
         const val EXTRA_NETWORK_SIGNAL_STRENGTH =
@@ -65,18 +67,19 @@ internal class SystemHfpGateway(
             "android.bluetooth.headsetclient.extra.NETWORK_ROAMING"
         const val EXTRA_OPERATOR_NAME =
             "android.bluetooth.headsetclient.extra.OPERATOR_NAME"
-        const val EXTRA_IN_BAND_RING =
-            "android.bluetooth.headsetclient.extra.IN_BAND_RING"
     }
 
-    /** 网关事件流；缓冲区避免广播线程被阻塞。 */
+    /** 网关事件流；缓冲区满时丢弃最旧事件，保证广播线程不被阻塞且最新状态优先。 */
     private val _events = MutableSharedFlow<HfpEvent>(
-        extraBufferCapacity = 64
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     override val events: SharedFlow<HfpEvent> = _events.asSharedFlow()
 
     /** 系统蓝牙入口。 */
     private val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
+
+    /** 本机蓝牙适配器；不支持蓝牙时为 null。 */
     private val adapter: BluetoothAdapter? = bluetoothManager?.adapter
 
     /** 反射拿到的 BluetoothHeadsetClient 类；为 null 表示系统不支持。 */
@@ -84,7 +87,7 @@ internal class SystemHfpGateway(
         Class.forName("android.bluetooth.BluetoothHeadsetClient")
     }.getOrNull()
 
-    /** 反射方法缓存，只缓存找到的方法，避免 ConcurrentHashMap 存 null。 */
+    /** 反射方法缓存，key = 类名#方法名/参数个数；只缓存命中的方法。 */
     private val methodCache = ConcurrentHashMap<String, Method>()
 
     /** 不存在的方法只探测一次，避免反复反射并刷日志。 */
@@ -110,7 +113,8 @@ internal class SystemHfpGateway(
     @Volatile
     private var proxyRequested = false
 
-    /** 权限错误只上报一次，避免刷屏。 */
+    /** 权限错误只上报一次，避免刷屏；可能由广播线程与引擎线程同时访问。 */
+    @Volatile
     private var missingPrivilegedReported = false
 
     /** 系统蓝牙广播 → 统一网关事件。 */
@@ -216,9 +220,10 @@ internal class SystemHfpGateway(
     override val supportsConference: Boolean
         get() {
             val vendorMethod = listOf("conferenceCall", "mergeCall", "mergeCalls")
-                .any { method(it, 1) != null }
+                .any { method(clientClass, it, 1) != null }
             val vendorAt = config.conferenceAtCommand.isNotBlank() &&
-                method("sendVendorAtCommand", 3) != null
+                (method(clientClass, "sendVendorAtCommand", 3) != null ||
+                    method(clientClass, "sendVendorAtCommand", 2) != null)
             return vendorMethod || vendorAt
         }
 
@@ -434,23 +439,29 @@ internal class SystemHfpGateway(
 
         // 部分芯片/车机栈会在 BluetoothHeadsetClient 上补会议合并方法。
         listOf("conferenceCall", "mergeCall", "mergeCalls").forEach { name ->
-            if (method(name, 1) != null) {
+            if (method(clientClass, name, 1) != null) {
                 PhoneLog.hfp.d { "会议合并: 尝试厂商方法 $name" }
                 if (invokeBoolean(name, device)) return true
             }
         }
 
         // AOSP 14 的兜底：允许通过厂商 AT 通道发送 CHLD=3。
-        val vendorAt = method("sendVendorAtCommand", 3)
-        if (vendorAt != null) {
-            PhoneLog.hfp.d { "会议合并: 使用厂商 AT 通道 ${config.conferenceAtCommand}" }
+        // 不同版本签名不同，依次尝试 (device, vendorId, at) 与 (vendorId, at)。
+        val command = config.conferenceAtCommand
+        if (method(clientClass, "sendVendorAtCommand", 3) != null) {
+            PhoneLog.hfp.d { "会议合并: 使用厂商 AT 通道 $command" }
+            return invokeBoolean(
+                "sendVendorAtCommand",
+                device,
+                config.conferenceVendorId,
+                command
+            )
         }
-        return vendorAt != null && invokeBoolean(
-            "sendVendorAtCommand",
-            device,
-            config.conferenceVendorId,
-            config.conferenceAtCommand
-        )
+        if (method(clientClass, "sendVendorAtCommand", 2) != null) {
+            PhoneLog.hfp.d { "会议合并: 使用旧版厂商 AT 通道 $command" }
+            return invokeBoolean("sendVendorAtCommand", config.conferenceVendorId, command)
+        }
+        return false
     }
 
     /** 启动/停止手机侧语音识别。 */
@@ -537,7 +548,7 @@ internal class SystemHfpGateway(
             ?: (invokeOn(raw, "getUUID")?.toString())
     }
 
-    /** 拉取 AG 上报的电量/信号/运营商/带内铃声。 */
+    /** 拉取 AG 上报的电量/信号/运营商。 */
     private fun refreshAg(device: BluetoothDevice) {
         val bundle = invoke("getCurrentAgEvents", device) as? Bundle ?: return
         PhoneLog.hfp.v { "AG 事件 ${device.address}: $bundle" }
@@ -548,8 +559,7 @@ internal class SystemHfpGateway(
                     battery = bundle.intOrNull(EXTRA_BATTERY_LEVEL),
                     signal = bundle.intOrNull(EXTRA_NETWORK_SIGNAL_STRENGTH),
                     roaming = bundle.intOrNull(EXTRA_NETWORK_ROAMING)?.let { it != 0 },
-                    operatorName = bundle.stringOrNull(EXTRA_OPERATOR_NAME),
-                    inBandRing = bundle.intOrNull(EXTRA_IN_BAND_RING)?.let { it != 0 }
+                    operatorName = bundle.stringOrNull(EXTRA_OPERATOR_NAME)
                 )
             )
         )
@@ -581,13 +591,14 @@ internal class SystemHfpGateway(
         return runCatching { adapter?.getRemoteDevice(address) }.getOrNull()
     }
 
-    /** 按名称+参数个数查找并缓存反射方法。 */
-    private fun method(name: String, argCount: Int): Method? {
-        val key = "$name/$argCount"
+    /** 按类 + 名称 + 参数个数查找并缓存反射方法。 */
+    private fun method(type: Class<*>?, name: String, argCount: Int): Method? {
+        if (type == null) return null
+        val key = "${type.name}#$name/$argCount"
         methodCache[key]?.let { return it }
         // 否定结果也缓存：系统方法表不会在运行期变化，避免反复反射。
         if (key in missingMethods) return null
-        val found = clientClass?.methods?.firstOrNull {
+        val found = type.methods.firstOrNull {
             it.name == name && it.parameterCount == argCount
         }
         if (found == null) {
@@ -602,7 +613,7 @@ internal class SystemHfpGateway(
     /** 反射调用代理方法；异常统一转成网关错误。 */
     private fun invoke(name: String, vararg args: Any?): Any? {
         val client = client ?: return null
-        val method = method(name, args.size) ?: return null
+        val method = method(clientClass, name, args.size) ?: return null
         return try {
             method.invoke(client, *args)
         } catch (e: InvocationTargetException) {
@@ -614,13 +625,10 @@ internal class SystemHfpGateway(
         }
     }
 
-    /** 反射调用无参方法（如 call.getState）。 */
+    /** 反射调用 call 对象的无参方法（如 getState），结果由调用方强转。 */
     private fun invokeOn(target: Any, name: String): Any? {
-        return runCatching {
-            target.javaClass.methods.firstOrNull {
-                it.name == name && it.parameterCount == 0
-            }?.invoke(target)
-        }.getOrNull()
+        val method = method(target.javaClass, name, 0) ?: return null
+        return runCatching { method.invoke(target) }.getOrNull()
     }
 
     /** 反射调用并返回 Boolean，异常或非 Boolean 结果都当作 false。 */
@@ -636,12 +644,14 @@ internal class SystemHfpGateway(
     /** 只关心调用是否成功、不关心返回值（如 setAudioRouteAllowed）。 */
     private fun invokeExists(name: String, vararg args: Any?): Boolean {
         val client = client ?: return false
-        val method = method(name, args.size) ?: return false
+        val method = method(clientClass, name, args.size) ?: return false
         return runCatching { method.invoke(client, *args); true }.getOrDefault(false)
     }
 
     /** 记录反射异常并上报一次错误事件。 */
     private fun reportInvokeError(name: String, error: Throwable) {
+        // SecurityException 统一按权限问题提示一次，避免每次调用都刷同一条。
+        reportPrivilegedIfNeeded(error)
         PhoneLog.hfp.w(error) { "HFP $name 调用失败" }
         _events.tryEmit(HfpEvent.Error("HFP $name 调用失败: ${error.message ?: error.javaClass.simpleName}"))
     }

@@ -4,12 +4,22 @@ import java.util.Locale
 
 /** 单个蓝牙 Profile 的连接状态。 */
 enum class ProfileState {
+    /** 未连接。 */
     DISCONNECTED,
+
+    /** 连接中。 */
     CONNECTING,
+
+    /** 已连接。 */
     CONNECTED,
+
+    /** 断开中。 */
     DISCONNECTING,
+
+    /** 系统未返回有效状态。 */
     UNKNOWN;
 
+    /** 是否已连接。 */
     val isConnected: Boolean get() = this == CONNECTED
 }
 
@@ -39,7 +49,7 @@ enum class CallState {
     ACTIVE,
     /** 已保持。 */
     HELD,
-    /** 对方主动保持。 */
+    /** 由协议栈标记的“响应方保持”，界面按普通保持处理。 */
     HELD_BY_RESPONSE,
     /** 已结束。 */
     TERMINATED;
@@ -53,8 +63,13 @@ enum class CallState {
 
 /** 通话方向。 */
 enum class CallDirection {
+    /** 来电。 */
     INCOMING,
+
+    /** 去电。 */
     OUTGOING,
+
+    /** 方向未知（如会议无号码）。 */
     UNKNOWN
 }
 
@@ -114,15 +129,25 @@ fun interface CallClassifier {
 
 /** HFP 通话音频（SCO/eSCO）连接状态。 */
 enum class AudioState {
+    /** 音频链路未建立。 */
     DISCONNECTED,
+
+    /** 正在建立音频链路。 */
     CONNECTING,
+
+    /** 音频已连接到车机。 */
     CONNECTED,
+
+    /** 系统未返回有效状态。 */
     UNKNOWN
 }
 
 /** 音频路由：车机或手机。 */
 enum class AudioRoute {
+    /** 通话音频在车机（SCO/eSCO）。 */
     CAR,
+
+    /** 通话音频在手机。 */
     PHONE
 }
 
@@ -144,23 +169,30 @@ enum class PhoneConnectionState {
  * 车机无 SIM 时，电话、信号、电量都来自这台手机；不要用 TelephonyManager 判断。
  */
 data class PhoneDevice(
+    /** MAC 地址，设备唯一标识。 */
     val address: String,
+    /** 蓝牙名称；系统已优先取别名。 */
     val name: String? = null,
-    val alias: String? = null,
+    /** 配对状态。 */
     val bondState: BondState = BondState.UNKNOWN,
+    /** HFP 连接状态。 */
     val hfpState: ProfileState = ProfileState.DISCONNECTED,
+    /** 是否为当前操作设备。 */
     val isActive: Boolean = false,
+    /** 手机电量百分比。 */
     val battery: Int? = null,
+    /** HFP 信号等级（通常 0–5，不是 dBm）。 */
     val signal: Int? = null,
+    /** 是否漫游。 */
     val roaming: Boolean? = null,
+    /** 运营商名称。 */
     val operatorName: String? = null,
+    /** 该设备的 SCO/eSCO 状态。 */
     val audioState: AudioState = AudioState.DISCONNECTED
 ) {
-    /** 界面展示名称：别名 > 蓝牙名 > 地址。 */
+    /** 界面展示名称：蓝牙名 > 地址。 */
     val displayName: String
-        get() = alias?.takeIf { it.isNotBlank() }
-            ?: name?.takeIf { it.isNotBlank() }
-            ?: address
+        get() = name?.takeIf { it.isNotBlank() } ?: address
 
     /** HFP 是否已连接。 */
     val isConnected: Boolean get() = hfpState.isConnected
@@ -168,15 +200,23 @@ data class PhoneDevice(
 
 /** 一路 HFP 通话。会议通话由 [isMultiParty] 标记。 */
 data class CallInfo(
+    /** HFP call 标识，同一次连接内稳定。 */
     val id: String,
+    /** 所属手机地址。 */
     val deviceId: String,
+    /** 归一化后的通话状态。 */
     val state: CallState,
+    /** 通话方向。 */
     val direction: CallDirection,
+    /** 号码；会议可能为空。 */
     val number: String? = null,
+    /** 展示名称：联系人姓名 > 号码。 */
     val displayName: String? = null,
     /** 联系人头像 URI，来自 ContactsProvider；无权限或未匹配时为 null。 */
     val photoUri: String? = null,
+    /** 是否为会议通话（多方）。 */
     val isMultiParty: Boolean = false,
+    /** 是否为带内铃声（手机侧已播放铃声）。 */
     val isInBandRing: Boolean = false,
     /** 通话来源；默认未知，可由 [CallClassifier] 补充。 */
     val kind: CallKind = CallKind.UNKNOWN,
@@ -232,10 +272,15 @@ data class CallInfo(
  * - 合并：conference 非空，active.isMultiParty = true
  */
 data class PhoneCallState(
+    /** 当前设备全部未结束通话，按展示优先级排序。 */
     val calls: List<CallInfo> = emptyList(),
+    /** 活动通话。 */
     val active: CallInfo? = null,
+    /** 保持中的通话（含被保持的会议）。 */
     val held: CallInfo? = null,
+    /** 普通来电（仅在没有活动通话时出现）。 */
     val incoming: CallInfo? = null,
+    /** 通话中的第二路来电。 */
     val waiting: CallInfo? = null,
     /** 当前会议通话；可能处于活动或保持状态。 */
     val conference: CallInfo? = null,
@@ -248,7 +293,9 @@ data class PhoneCallState(
     val outgoing: CallInfo? = null,
     /** 界面阶段，HMI 可直接 when 切换布局。 */
     val uiState: CallUiState = CallUiState.IDLE,
+    /** SCO/eSCO 音频状态。 */
     val audio: AudioState = AudioState.DISCONNECTED,
+    /** 是否宽带语音（mSBC）。 */
     val audioWideband: Boolean = false,
     /** 当前音频路由；无通话时为 null，避免空闲时误显示“车机音频”。 */
     val audioRoute: AudioRoute? = null,
@@ -256,7 +303,9 @@ data class PhoneCallState(
     val micMuted: Boolean = false,
     /** 当前系统/配置是否具备会议合并通道，不代表手机一定支持。 */
     val conferenceMergeSupported: Boolean = false,
+    /** 当前数据源手机地址。 */
     val deviceId: String? = null,
+    /** 当前数据源手机名称。 */
     val deviceName: String? = null
 ) {
     /** 是否存在未结束的通话。 */
@@ -319,16 +368,23 @@ data class PhoneCallState(
     /** 是否有可挂断的活动通话。 */
     val canHangup: Boolean get() = active != null
 
-    /** 是否可以在活动/保持之间切换；有等待来电时 CHLD=2 会接听等待，故禁止。 */
-    val canSwap: Boolean get() = active != null && held != null && waiting == null
+    /** 是否有可取消的去电（对方尚未接听）。 */
+    val canCancelOutgoing: Boolean get() = outgoing != null
+
+    /** 是否可以在活动/保持之间切换；有等待来电或去电时禁止。 */
+    val canSwap: Boolean
+        get() = active != null && held != null && waiting == null && outgoing == null
 
     /** 是否可以合并为会议：需活动+保持两路，且无等待/去电，系统提供合并通道。 */
     val canMerge: Boolean
         get() = active != null && held != null && waiting == null && outgoing == null &&
             !active.isMultiParty && !held.isMultiParty && conferenceMergeSupported
 
-    /** 是否可以保持当前通话（有等待来电时 CHLD=2 会接听，故禁止）。 */
-    val canHold: Boolean get() = active != null && waiting == null
+    /**
+     * 是否可以保持/切换当前通话。
+     * 有等待来电时 CHLD=2 会接听，有去电时切换目标不明确，两种情况都禁止。
+     */
+    val canHold: Boolean get() = active != null && waiting == null && outgoing == null
 
     /** 是否可以恢复保持中的通话（有活动通话、去电或等待来电时先处理当前）。 */
     val canResume: Boolean
@@ -385,40 +441,65 @@ fun formatDuration(totalSeconds: Long): String {
 
 /** 联系人条目，来自系统 ContactsProvider。 */
 data class Contact(
+    /** 联系人 ID。 */
     val id: Long,
+    /** 显示名称。 */
     val name: String?,
+    /** 号码。 */
     val number: String,
+    /** 头像 content URI。 */
     val photoUri: String? = null,
+    /** 系统号码类型（手机/家庭/工作等）。 */
     val type: Int = 0
 )
 
 /** 通话记录条目，来自系统 CallLog。 */
 data class CallLogEntry(
+    /** 记录 ID。 */
     val id: Long,
+    /** 号码。 */
     val number: String?,
+    /** 缓存的联系人名称。 */
     val name: String?,
+    /** 系统原始类型：1 来电、2 去电、3 未接等。 */
     val type: Int,
+    /** 发生时间（墙上时间）。 */
     val dateMillis: Long,
+    /** 通话时长（秒）。 */
     val durationSeconds: Long
 )
 
 /** 一次性事件，适合 Toast、Snackbar 或日志；持续状态请用 StateFlow。 */
 sealed interface PhoneEvent {
     /** 普通提示，如服务重连。 */
-    data class Info(val message: String) : PhoneEvent
+    data class Info(
+        /** 提示文案。 */
+        val message: String
+    ) : PhoneEvent
 
     /** 错误提示，如权限缺失或 HFP 调用失败。 */
-    data class Error(val message: String) : PhoneEvent
+    data class Error(
+        /** 错误文案。 */
+        val message: String
+    ) : PhoneEvent
 
     /** 通话阶段变化；适合埋点或触发一次性动画。 */
     data class CallUiChanged(
+        /** 变化前阶段。 */
         val previous: CallUiState,
+        /** 变化后阶段。 */
         val current: CallUiState
     ) : PhoneEvent
 
     /** 某一路通话结束；适合日志、提示或局部动画。 */
-    data class CallEnded(val call: CallInfo) : PhoneEvent
+    data class CallEnded(
+        /** 结束的通话快照。 */
+        val call: CallInfo
+    ) : PhoneEvent
 
     /** 当前手机的所有通话结束；用于展示“通话结束”页。 */
-    data class SessionEnded(val lastCall: CallInfo?) : PhoneEvent
+    data class SessionEnded(
+        /** 最后结束的一路；无信息时为 null。 */
+        val lastCall: CallInfo?
+    ) : PhoneEvent
 }
